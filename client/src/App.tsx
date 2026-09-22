@@ -10,6 +10,7 @@ import { ShopModal } from './components/ShopModal';
 import { ProfileView } from './components/ProfileView';
 import { LessonModal } from './components/LessonModal';
 import { AuthModal } from './components/AuthModal';
+import { GuestPromptModal } from './components/GuestPromptModal';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { AdminDashboard } from './components/admin/AdminDashboard';
 import { useAuth } from './context/AuthContext';
@@ -26,14 +27,22 @@ interface ActiveLessonData {
 }
 
 export function App() {
-  const { user, refreshProfile, isAdmin, mustChangePassword } = useAuth();
+  const { user, refreshProfile, isAdmin, isGuest, mustChangePassword } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('learn');
   const [units, setUnits] = useState<Unit[]>([]);
   const [loadingCurriculum, setLoadingCurriculum] = useState(true);
   const [activeLesson, setActiveLesson] = useState<ActiveLessonData | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('register');
+  const [showGuestPrompt, setShowGuestPrompt] = useState(false);
+  const [guestPromptScore, setGuestPromptScore] = useState<number | undefined>(undefined);
   const [showAdminDashboard, setShowAdminDashboard] = useState(false);
   const [todayXp, setTodayXp] = useState(0);
+
+  const handleOpenAuth = (mode: 'login' | 'register' = 'register') => {
+    setAuthMode(mode);
+    setShowAuthModal(true);
+  };
 
   // Load Curriculum
   const loadCurriculum = async () => {
@@ -106,9 +115,15 @@ export function App() {
   };
 
   const handleLessonFinished = async (result: { score: number; stars: number; xp: number }) => {
-    setTodayXp(prev => prev + result.xp);
-    await refreshProfile();
-    await loadCurriculum();
+    if (!isGuest) {
+      setTodayXp(prev => prev + result.xp);
+      await refreshProfile();
+      await loadCurriculum();
+    } else {
+      // Prompt guest to join as a member after completing a lesson
+      setGuestPromptScore(result.score);
+      setShowGuestPrompt(true);
+    }
   };
 
   return (
@@ -120,6 +135,7 @@ export function App() {
           onOpenProfile={() => setActiveTab('leaderboard')}
           onOpenShop={() => setActiveTab('shop')}
           onOpenAdmin={() => setShowAdminDashboard(true)}
+          onOpenAuth={handleOpenAuth}
           todayXp={todayXp}
         />
 
@@ -155,7 +171,7 @@ export function App() {
               <LeaderboardView />
               <div className="px-4 pb-28">
                 <ProfileView
-                  onOpenAuth={() => setShowAuthModal(true)}
+                  onOpenAuth={handleOpenAuth}
                   onOpenAdmin={() => setShowAdminDashboard(true)}
                 />
               </div>
@@ -186,12 +202,32 @@ export function App() {
             xpReward={activeLesson.xpReward}
             onClose={() => setActiveLesson(null)}
             onFinished={handleLessonFinished}
+            onOpenAuth={handleOpenAuth}
           />
         )}
 
-        {/* Auth / Account Modal */}
+        {/* Auth / Member Account Modal */}
         {showAuthModal && (
-          <AuthModal onClose={() => setShowAuthModal(false)} />
+          <AuthModal
+            initialMode={authMode}
+            onClose={() => setShowAuthModal(false)}
+          />
+        )}
+
+        {/* Post-Lesson Member Join Prompt Modal (Guest Mode) */}
+        {showGuestPrompt && isGuest && (
+          <GuestPromptModal
+            score={guestPromptScore}
+            onClose={() => setShowGuestPrompt(false)}
+            onJoin={() => {
+              setShowGuestPrompt(false);
+              handleOpenAuth('register');
+            }}
+            onLogin={() => {
+              setShowGuestPrompt(false);
+              handleOpenAuth('login');
+            }}
+          />
         )}
 
         {/* Forced First-Time Password Change Modal */}

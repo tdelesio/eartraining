@@ -187,6 +187,7 @@ function getAllUsers() {
            p.xp, p.gems, p.hearts, p.streak_days, p.longest_streak, p.last_active_date
     FROM users u
     LEFT JOIN user_profiles p ON u.id = p.user_id
+    WHERE u.is_guest = 0
     ORDER BY u.id ASC
   `).all();
   return rows.map(r => ({ ...r }));
@@ -391,6 +392,7 @@ function getLeaderboard() {
     SELECT u.id, u.display_name, u.avatar, p.xp, p.streak_days
     FROM users u
     JOIN user_profiles p ON u.id = p.user_id
+    WHERE u.is_guest = 0
     ORDER BY p.xp DESC
     LIMIT 20
   `).all();

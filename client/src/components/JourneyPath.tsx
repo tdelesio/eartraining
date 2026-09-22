@@ -2,6 +2,7 @@ import React from 'react';
 import { Star, Lock, Play, Gift } from 'lucide-react';
 import type { Unit, Level } from '../types';
 import { soundEngine } from '../audio/soundEngine';
+import { useAuth } from '../context/AuthContext';
 
 interface JourneyPathProps {
   units: Unit[];
@@ -9,6 +10,8 @@ interface JourneyPathProps {
 }
 
 export const JourneyPath: React.FC<JourneyPathProps> = ({ units, onStartLesson }) => {
+  const { isGuest } = useAuth();
+
   // Offsets for the authentic winding path
   const getHorizontalOffsetClass = (index: number) => {
     const cycle = index % 4;
@@ -20,6 +23,19 @@ export const JourneyPath: React.FC<JourneyPathProps> = ({ units, onStartLesson }
 
   return (
     <div className="pb-28 pt-3 px-4 max-w-[480px] mx-auto select-none">
+      {isGuest && (
+        <div className="mb-5 p-3.5 rounded-2xl bg-amber-50 border-2 border-amber-300 shadow-2xs flex items-center gap-3">
+          <span className="text-2xl shrink-0">👤</span>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-xs font-black uppercase tracking-wider text-amber-900">
+              Playing as Guest
+            </h3>
+            <p className="text-xs text-amber-800 font-medium leading-snug">
+              Explore lessons freely. Scores and daily streaks are not saved for guests.
+            </p>
+          </div>
+        </div>
+      )}
       {units.map((unit, unitIdx) => {
         const completedLevelsInUnit = unit.levels.filter(l => l.completed).length;
         const totalLevels = unit.levels.length;

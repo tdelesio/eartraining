@@ -198,7 +198,7 @@ app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
   try {
     const units = db.getCurriculumTree();
     let userProgress = [];
-    if (req.user) {
+    if (req.user && req.user.is_guest !== 1 && req.user.isGuest !== 1) {
       userProgress = db.getUserProgress(req.user.id);
     }
 
@@ -516,6 +516,18 @@ app.post('/api/admin/preview-question', auth.authMiddleware, auth.requireAdmin, 
 app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMiddleware, (req, res) => {
   try {
     const { unitId, levelId, score, stars, xpEarned = 20, mistakes = [] } = req.body;
+
+    // Do NOT track progress as a guest
+    if (req.user && (req.user.is_guest === 1 || req.user.isGuest === 1)) {
+      return res.json({
+        success: true,
+        isGuest: true,
+        message: 'Guest session: progress is not tracked',
+        user: db.getUserById(req.user.id),
+        streakResult: null,
+        progress: []
+      });
+    }
 
     const result = db.recordLessonProgress(
       req.user.id,

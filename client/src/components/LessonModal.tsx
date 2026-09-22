@@ -14,6 +14,7 @@ interface LessonModalProps {
   xpReward: number;
   onClose: () => void;
   onFinished: (result: { score: number; stars: number; xp: number }) => void;
+  onOpenAuth?: (mode?: 'login' | 'register') => void;
 }
 
 export const LessonModal: React.FC<LessonModalProps> = ({
@@ -23,9 +24,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
   questions,
   xpReward,
   onClose,
-  onFinished
+  onFinished,
+  onOpenAuth
 }) => {
-  const { user, setUser } = useAuth();
+  const { user, setUser, isGuest } = useAuth();
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
@@ -163,27 +165,29 @@ export const LessonModal: React.FC<LessonModalProps> = ({
     soundEngine.playStreakFanfare();
     setIsCompleted(true);
 
+    const actualEarnedXp = isGuest ? 0 : earnedXp;
+
     try {
       const res = await api.submitLesson({
         unitId,
         levelId,
         score,
         stars,
-        xpEarned: earnedXp,
+        xpEarned: actualEarnedXp,
         mistakes: mistakesList
       });
 
-      if (res.user) {
+      if (!isGuest && res.user) {
         setUser(res.user);
       }
-      if (res.streakResult) {
+      if (!isGuest && res.streakResult) {
         setStreakResult(res.streakResult);
       }
     } catch (e) {
       console.error('Failed to submit lesson progress:', e);
     }
 
-    onFinished({ score, stars, xp: earnedXp });
+    onFinished({ score, stars, xp: actualEarnedXp });
   };
 
   if (!currentQuestion) return null;
@@ -434,10 +438,12 @@ export const LessonModal: React.FC<LessonModalProps> = ({
             </p>
 
             {/* Stats Row */}
-            <div className="grid grid-cols-3 gap-2 my-5">
+            <div className="grid grid-cols-3 gap-2 my-4">
               <div className="bg-amber-50 border border-amber-200 rounded-2xl p-2.5">
                 <span className="text-xs font-bold text-amber-700 block">XP Gained</span>
-                <span className="text-lg font-black text-amber-600">+{xpReward}</span>
+                <span className="text-lg font-black text-amber-600">
+                  {isGuest ? '0' : `+${xpReward}`}
+                </span>
               </div>
               <div className="bg-sky-50 border border-sky-200 rounded-2xl p-2.5">
                 <span className="text-xs font-bold text-sky-700 block">Accuracy</span>
@@ -448,20 +454,45 @@ export const LessonModal: React.FC<LessonModalProps> = ({
               <div className="bg-orange-50 border border-orange-200 rounded-2xl p-2.5">
                 <span className="text-xs font-bold text-orange-700 block">Streak</span>
                 <div className="flex items-center justify-center gap-1">
-                  <Flame className="w-4 h-4 text-orange-500 fill-orange-500" />
-                  <span className="text-lg font-black text-orange-600">
-                    {streakResult?.streakDays || user?.streak_days || 1}
+                  <Flame className={`w-4 h-4 ${isGuest ? 'text-slate-400' : 'text-orange-500 fill-orange-500'}`} />
+                  <span className={`text-base font-black ${isGuest ? 'text-slate-500 text-xs mt-0.5' : 'text-orange-600'}`}>
+                    {isGuest ? 'Not saved' : (streakResult?.streakDays || user?.streak_days || 1)}
                   </span>
                 </div>
               </div>
             </div>
+
+            {/* Guest Mode Callout */}
+            {isGuest && (
+              <div className="bg-amber-50 border border-amber-300 rounded-2xl p-3.5 mb-4 text-left">
+                <div className="flex items-center gap-1.5 text-amber-800 font-extrabold text-xs">
+                  <span>⚠️</span>
+                  <span>Guest Mode: Progress Not Saved</span>
+                </div>
+                <p className="text-xs text-amber-700 font-medium mt-1">
+                  Create a free member account to save this lesson, track XP, and build your streak!
+                </p>
+                {onOpenAuth && (
+                  <button
+                    onClick={() => {
+                      soundEngine.playSuccessChime();
+                      onClose();
+                      onOpenAuth('register');
+                    }}
+                    className="mt-2.5 w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs shadow-[0_2px_0_0_#047857] duo-btn-push"
+                  >
+                    Join Free to Save Progress
+                  </button>
+                )}
+              </div>
+            )}
 
             <button
               onClick={() => {
                 soundEngine.playButtonClick();
                 onClose();
               }}
-              className="w-full py-4 rounded-2xl bg-emerald-500 hover:bg-emerald-600 text-white font-black text-base shadow-[0_5px_0_0_#047857] duo-btn-push"
+              className="w-full py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-900 text-white font-black text-sm shadow-[0_4px_0_0_#0f172a] duo-btn-push"
             >
               Back to Roadmap
             </button>

@@ -8,6 +8,7 @@ interface AuthContextType {
   user: User | null;
   loading: boolean;
   isAdmin: boolean;
+  isGuest: boolean;
   mustChangePassword: boolean;
   dailyHistory: DailyActivity[];
   login: (u: string, p: string) => Promise<void>;
@@ -109,6 +110,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const isAdmin = Boolean(user && user.role === 'admin');
+  const isGuest = Boolean(user && user.is_guest === 1);
   const mustChangePassword = Boolean(user && (user.must_change_password === 1 || user.must_change_password === true));
 
   return (
@@ -117,6 +119,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         loading,
         isAdmin,
+        isGuest,
         mustChangePassword,
         dailyHistory,
         login,

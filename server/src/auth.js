@@ -21,6 +21,7 @@ function generateToken(user) {
       email: user.email,
       displayName: user.display_name,
       isGuest: user.is_guest,
+      is_guest: user.is_guest,
       role: user.role || 'user',
       mustChangePassword: Boolean(user.must_change_password)
     },
