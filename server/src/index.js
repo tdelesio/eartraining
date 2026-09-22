@@ -154,14 +154,15 @@ app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
       progressMap.set(`${p.unit_id}_${p.level_id}`, p);
     });
 
-    // Determine lock/unlock states
+    // Determine lock/unlock states (all unlocked by default for testing; can enforce sequential with UNLOCK_ALL_LEVELS=false)
+    const unlockAll = process.env.UNLOCK_ALL_LEVELS !== 'false';
     let previousCompleted = true; // Unit 0 Level 0 is unlocked by default
     const unitsWithStatus = units.map((unit) => {
       const levelsWithStatus = unit.levels.map((level) => {
         const key = `${unit.id}_${level.id}`;
         const record = progressMap.get(key);
         const isCompleted = record ? record.stars > 0 : false;
-        const isUnlocked = previousCompleted;
+        const isUnlocked = unlockAll || previousCompleted;
         if (!isCompleted) {
           previousCompleted = false;
         }
