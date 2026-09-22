@@ -1,6 +1,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 const fs = require('node:fs');
+const bcrypt = require('bcryptjs');
 
 const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 if (!fs.existsSync(dataDir)) {
@@ -24,6 +25,8 @@ db.exec(`
     display_name TEXT NOT NULL,
     avatar TEXT NOT NULL DEFAULT '🎧',
     is_guest INTEGER NOT NULL DEFAULT 0,
+    role TEXT NOT NULL DEFAULT 'user',
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -40,6 +43,30 @@ db.exec(`
     streak_freezes INTEGER NOT NULL DEFAULT 1,
     sound_preset TEXT NOT NULL DEFAULT 'grand_piano',
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS curriculum_units (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL,
+    icon TEXT NOT NULL DEFAULT '🎵',
+    color TEXT NOT NULL DEFAULT '#58cc02',
+    order_index INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS curriculum_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    unit_id INTEGER NOT NULL,
+    level_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    type TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    xp_reward INTEGER NOT NULL DEFAULT 20,
+    order_index INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(unit_id) REFERENCES curriculum_units(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS lesson_progress (
@@ -78,6 +105,18 @@ db.exec(`
   );
 `);
 
+// Migration columns if upgrading existing sqlite
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';`);
+} catch (e) {
+  // column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;`);
+} catch (e) {
+  // column already exists
+}
+
 // Date helper (YYYY-MM-DD)
 function getTodayString() {
   const now = new Date();
@@ -91,12 +130,12 @@ function getYesterdayString() {
 }
 
 // User operations
-function createUser(username, email, passwordHash, displayName, isGuest = 0, avatar = '🎧') {
+function createUser(username, email, passwordHash, displayName, isGuest = 0, avatar = '🎧', role = 'user', mustChangePassword = 0) {
   const insertUser = db.prepare(`
-    INSERT INTO users (username, email, password_hash, display_name, is_guest, avatar)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO users (username, email, password_hash, display_name, is_guest, avatar, role, must_change_password)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const result = insertUser.run(username, email, passwordHash, displayName, isGuest, avatar);
+  const result = insertUser.run(username, email, passwordHash, displayName, isGuest, avatar, role, mustChangePassword);
   const userId = Number(result.lastInsertRowid);
 
   // Initialize user profile
@@ -110,7 +149,7 @@ function createUser(username, email, passwordHash, displayName, isGuest = 0, ava
 
 function getUserById(id) {
   const row = db.prepare(`
-    SELECT u.id, u.username, u.email, u.display_name, u.avatar, u.is_guest, u.created_at,
+    SELECT u.id, u.username, u.email, u.display_name, u.avatar, u.is_guest, u.role, u.must_change_password, u.created_at,
            p.xp, p.gems, p.hearts, p.max_hearts, p.streak_days, p.longest_streak,
            p.last_active_date, p.daily_goal_xp, p.streak_freezes, p.sound_preset
     FROM users u
@@ -126,6 +165,45 @@ function getUserByUsername(username) {
     SELECT * FROM users WHERE username = ?
   `).get(username);
   return row ? { ...row } : null;
+}
+
+function getUserByEmail(email) {
+  const row = db.prepare(`
+    SELECT * FROM users WHERE LOWER(email) = LOWER(?)
+  `).get(email);
+  return row ? { ...row } : null;
+}
+
+function getUserByUsernameOrEmail(identifier) {
+  const row = db.prepare(`
+    SELECT * FROM users WHERE username = ? OR LOWER(email) = LOWER(?)
+  `).get(identifier, identifier);
+  return row ? { ...row } : null;
+}
+
+function getAllUsers() {
+  const rows = db.prepare(`
+    SELECT u.id, u.username, u.email, u.display_name, u.avatar, u.is_guest, u.role, u.must_change_password, u.created_at,
+           p.xp, p.gems, p.hearts, p.streak_days, p.longest_streak, p.last_active_date
+    FROM users u
+    LEFT JOIN user_profiles p ON u.id = p.user_id
+    ORDER BY u.id ASC
+  `).all();
+  return rows.map(r => ({ ...r }));
+}
+
+function updateUserRole(userId, newRole) {
+  db.prepare(`
+    UPDATE users SET role = ? WHERE id = ?
+  `).run(newRole, userId);
+  return getUserById(userId);
+}
+
+function updateUserPassword(userId, passwordHash, mustChangePassword = 0) {
+  db.prepare(`
+    UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?
+  `).run(passwordHash, mustChangePassword, userId);
+  return getUserById(userId);
 }
 
 function updateUserProfile(userId, updates = {}) {
@@ -209,7 +287,6 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
 
   const longestStreak = Math.max(currentStreak, profile.longest_streak);
   const totalXp = profile.xp + xpEarned;
-  // Award 15 bonus gems on lesson completion
   const totalGems = profile.gems + 15;
 
   db.prepare(`
@@ -230,7 +307,6 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
 }
 
 function recordLessonProgress(userId, unitId, levelId, score, stars, xpEarned) {
-  // Upsert lesson progress
   const existing = db.prepare(`
     SELECT * FROM lesson_progress WHERE user_id = ? AND unit_id = ? AND level_id = ?
   `).get(userId, unitId, levelId);
@@ -331,11 +407,239 @@ function claimGuestAccount(guestUserId, newUsername, passwordHash, displayName) 
   return getUserById(guestUserId);
 }
 
+// ==========================================
+// Curriculum & Lesson CMS Database Functions
+// ==========================================
+
+function getAllUnits() {
+  const rows = db.prepare(`
+    SELECT * FROM curriculum_units
+    ORDER BY order_index ASC, id ASC
+  `).all();
+  return rows.map(r => ({ ...r }));
+}
+
+function getLessonsByUnit(unitId) {
+  const rows = db.prepare(`
+    SELECT * FROM curriculum_lessons
+    WHERE unit_id = ?
+    ORDER BY order_index ASC, level_number ASC, id ASC
+  `).all(unitId);
+  return rows.map(r => ({
+    ...r,
+    config: r.config_json ? JSON.parse(r.config_json) : {}
+  }));
+}
+
+function getLessonById(lessonId) {
+  const row = db.prepare(`
+    SELECT * FROM curriculum_lessons WHERE id = ?
+  `).get(lessonId);
+  if (!row) return null;
+  return {
+    ...row,
+    config: row.config_json ? JSON.parse(row.config_json) : {}
+  };
+}
+
+function getLessonByUnitAndLevel(unitId, levelNumber) {
+  const row = db.prepare(`
+    SELECT * FROM curriculum_lessons WHERE unit_id = ? AND level_number = ?
+  `).get(unitId, levelNumber);
+  if (!row) return null;
+  return {
+    ...row,
+    config: row.config_json ? JSON.parse(row.config_json) : {}
+  };
+}
+
+function getCurriculumTree() {
+  const units = getAllUnits();
+  return units.map(u => ({
+    id: u.id,
+    title: u.title,
+    subtitle: u.subtitle,
+    icon: u.icon,
+    color: u.color,
+    order_index: u.order_index,
+    levels: getLessonsByUnit(u.id).map(l => ({
+      id: l.level_number,
+      lessonDbId: l.id,
+      title: l.title,
+      description: l.description,
+      type: l.type,
+      config: l.config,
+      xpReward: l.xp_reward,
+      order_index: l.order_index
+    }))
+  }));
+}
+
+function createUnit({ id, title, subtitle, icon = '🎵', color = '#58cc02' }) {
+  let targetId = id;
+  if (targetId === undefined || targetId === null) {
+    const maxRow = db.prepare('SELECT MAX(id) as maxId FROM curriculum_units').get();
+    targetId = (maxRow?.maxId !== null && maxRow?.maxId !== undefined) ? maxRow.maxId + 1 : 0;
+  }
+  const maxOrder = db.prepare('SELECT MAX(order_index) as maxOrder FROM curriculum_units').get();
+  const nextOrder = (maxOrder?.maxOrder !== null && maxOrder?.maxOrder !== undefined) ? maxOrder.maxOrder + 1 : 0;
+
+  db.prepare(`
+    INSERT INTO curriculum_units (id, title, subtitle, icon, color, order_index)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(targetId, title, subtitle, icon, color, nextOrder);
+
+  return db.prepare('SELECT * FROM curriculum_units WHERE id = ?').get(targetId);
+}
+
+function updateUnit(unitId, { title, subtitle, icon, color }) {
+  db.prepare(`
+    UPDATE curriculum_units
+    SET title = COALESCE(?, title),
+        subtitle = COALESCE(?, subtitle),
+        icon = COALESCE(?, icon),
+        color = COALESCE(?, color)
+    WHERE id = ?
+  `).run(title, subtitle, icon, color, unitId);
+
+  return db.prepare('SELECT * FROM curriculum_units WHERE id = ?').get(unitId);
+}
+
+function deleteUnit(unitId) {
+  // Cascading deletes lessons
+  db.prepare('DELETE FROM curriculum_units WHERE id = ?').run(unitId);
+  return true;
+}
+
+function createLesson(unitId, { title, description, type, config = {}, xpReward = 20 }) {
+  // Determine next level_number and order_index in this unit
+  const maxLevelRow = db.prepare('SELECT MAX(level_number) as maxLvl, MAX(order_index) as maxOrder FROM curriculum_lessons WHERE unit_id = ?').get(unitId);
+  const nextLevel = (maxLevelRow?.maxLvl !== null && maxLevelRow?.maxLvl !== undefined) ? maxLevelRow.maxLvl + 1 : 0;
+  const nextOrder = (maxLevelRow?.maxOrder !== null && maxLevelRow?.maxOrder !== undefined) ? maxLevelRow.maxOrder + 1 : 0;
+
+  const res = db.prepare(`
+    INSERT INTO curriculum_lessons (unit_id, level_number, title, description, type, config_json, xp_reward, order_index)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(unitId, nextLevel, title, description, type, JSON.stringify(config), xpReward, nextOrder);
+
+  return getLessonById(Number(res.lastInsertRowid));
+}
+
+function updateLesson(lessonId, { title, description, type, config, xpReward }) {
+  const existing = getLessonById(lessonId);
+  if (!existing) return null;
+
+  const newTitle = title !== undefined ? title : existing.title;
+  const newDesc = description !== undefined ? description : existing.description;
+  const newType = type !== undefined ? type : existing.type;
+  const newConfigJson = config !== undefined ? JSON.stringify(config) : existing.config_json;
+  const newXp = xpReward !== undefined ? xpReward : existing.xp_reward;
+
+  db.prepare(`
+    UPDATE curriculum_lessons
+    SET title = ?, description = ?, type = ?, config_json = ?, xp_reward = ?
+    WHERE id = ?
+  `).run(newTitle, newDesc, newType, newConfigJson, newXp, lessonId);
+
+  return getLessonById(lessonId);
+}
+
+function deleteLesson(lessonId) {
+  db.prepare('DELETE FROM curriculum_lessons WHERE id = ?').run(lessonId);
+  return true;
+}
+
+function reorderLessons(lessonIdsInOrder) {
+  const stmt = db.prepare('UPDATE curriculum_lessons SET order_index = ?, level_number = ? WHERE id = ?');
+  lessonIdsInOrder.forEach((id, idx) => {
+    stmt.run(idx, idx, id);
+  });
+  return true;
+}
+
+function reorderUnits(unitIdsInOrder) {
+  const stmt = db.prepare('UPDATE curriculum_units SET order_index = ? WHERE id = ?');
+  unitIdsInOrder.forEach((id, idx) => {
+    stmt.run(idx, id);
+  });
+  return true;
+}
+
+// ==========================================
+// Auto-seeding of Initial Admin & Curriculum
+// ==========================================
+
+function seedInitialAdmin() {
+  const existing = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get('tdelesio@gmail.com', 'tdelesio');
+  if (!existing) {
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync('password', salt);
+    const res = db.prepare(`
+      INSERT INTO users (username, email, password_hash, display_name, avatar, is_guest, role, must_change_password)
+      VALUES (?, ?, ?, ?, ?, 0, 'admin', 1)
+    `).run('tdelesio', 'tdelesio@gmail.com', hash, 'Tim Delesio', '🎵');
+    const userId = Number(res.lastInsertRowid);
+    db.prepare(`
+      INSERT INTO user_profiles (user_id, xp, gems, hearts, max_hearts, streak_days, longest_streak, daily_goal_xp, streak_freezes, sound_preset)
+      VALUES (?, 150, 500, 5, 5, 1, 1, 30, 2, 'grand_piano')
+    `).run(userId);
+    console.log('Seeded initial admin user: tdelesio@gmail.com (Password: password, must_change_password: 1)');
+  } else if (existing.role !== 'admin') {
+    // Ensure tdelesio has admin role if already registered
+    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(existing.id);
+  }
+}
+
+function seedInitialCurriculum() {
+  const countRow = db.prepare('SELECT COUNT(*) as count FROM curriculum_units').get();
+  if (countRow.count === 0) {
+    const curriculum = require('./curriculum');
+    const insertUnit = db.prepare(`
+      INSERT INTO curriculum_units (id, title, subtitle, icon, color, order_index)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const insertLesson = db.prepare(`
+      INSERT INTO curriculum_lessons (unit_id, level_number, title, description, type, config_json, xp_reward, order_index)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    curriculum.UNITS.forEach((unit, uIdx) => {
+      insertUnit.run(unit.id, unit.title, unit.subtitle, unit.icon, unit.color, uIdx);
+      unit.levels.forEach((lvl, lIdx) => {
+        insertLesson.run(
+          unit.id,
+          lvl.id,
+          lvl.title,
+          lvl.description,
+          lvl.type,
+          JSON.stringify({}),
+          lvl.xpReward || 20,
+          lIdx
+        );
+      });
+    });
+    console.log(`Seeded ${curriculum.UNITS.length} initial curriculum units into database.`);
+  }
+}
+
+// Run initial seeding
+try {
+  seedInitialAdmin();
+  seedInitialCurriculum();
+} catch (e) {
+  console.error('Initial seeding warning:', e);
+}
+
 module.exports = {
   db,
   createUser,
   getUserById,
   getUserByUsername,
+  getUserByEmail,
+  getUserByUsernameOrEmail,
+  getAllUsers,
+  updateUserRole,
+  updateUserPassword,
   updateUserProfile,
   recordLessonProgress,
   recordDailyActivityAndStreak,
@@ -345,5 +649,19 @@ module.exports = {
   getMistakes,
   getLeaderboard,
   claimGuestAccount,
-  getTodayString
+  getTodayString,
+  // Curriculum CMS
+  getAllUnits,
+  getLessonsByUnit,
+  getLessonById,
+  getLessonByUnitAndLevel,
+  getCurriculumTree,
+  createUnit,
+  updateUnit,
+  deleteUnit,
+  createLesson,
+  updateLesson,
+  deleteLesson,
+  reorderLessons,
+  reorderUnits
 };

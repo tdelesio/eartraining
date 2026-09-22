@@ -7,11 +7,14 @@ import type { SoundPreset } from '../audio/soundEngine';
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  isAdmin: boolean;
+  mustChangePassword: boolean;
   dailyHistory: DailyActivity[];
   login: (u: string, p: string) => Promise<void>;
   register: (u: string, p: string, name?: string, email?: string) => Promise<void>;
+  changePassword: (newPassword: string) => Promise<void>;
   continueAsGuest: () => Promise<void>;
-  claimAccount: (u: string, p: string, name?: string) => Promise<void>;
+  claimAccount: (u: string, p: string, name?: string, email?: string) => Promise<void>;
   logout: () => void;
   setUser: React.Dispatch<React.SetStateAction<User | null>>;
   refreshProfile: () => Promise<void>;
@@ -63,13 +66,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(res.user);
   };
 
+  const changePassword = async (newPassword: string) => {
+    const res = await api.changePassword(newPassword);
+    setUser(res.user);
+  };
+
   const continueAsGuest = async () => {
     const res = await api.guestLogin();
     setUser(res.user);
   };
 
-  const claimAccount = async (u: string, p: string, name?: string) => {
-    const res = await api.claimAccount(u, p, name);
+  const claimAccount = async (u: string, p: string, name?: string, email?: string) => {
+    const res = await api.claimAccount(u, p, name, email);
     setUser(res.user);
   };
 
@@ -100,14 +108,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const isAdmin = Boolean(user && user.role === 'admin');
+  const mustChangePassword = Boolean(user && (user.must_change_password === 1 || user.must_change_password === true));
+
   return (
     <AuthContext.Provider
       value={{
         user,
         loading,
+        isAdmin,
+        mustChangePassword,
         dailyHistory,
         login,
         register,
+        changePassword,
         continueAsGuest,
         claimAccount,
         logout,

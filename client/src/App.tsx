@@ -10,6 +10,8 @@ import { ShopModal } from './components/ShopModal';
 import { ProfileView } from './components/ProfileView';
 import { LessonModal } from './components/LessonModal';
 import { AuthModal } from './components/AuthModal';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { AdminDashboard } from './components/admin/AdminDashboard';
 import { useAuth } from './context/AuthContext';
 import { api } from './services/api';
 import type { Unit, Level, Question } from './types';
@@ -24,12 +26,13 @@ interface ActiveLessonData {
 }
 
 export function App() {
-  const { user, refreshProfile } = useAuth();
+  const { user, refreshProfile, isAdmin, mustChangePassword } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('learn');
   const [units, setUnits] = useState<Unit[]>([]);
   const [loadingCurriculum, setLoadingCurriculum] = useState(true);
   const [activeLesson, setActiveLesson] = useState<ActiveLessonData | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showAdminDashboard, setShowAdminDashboard] = useState(false);
   const [todayXp, setTodayXp] = useState(0);
 
   // Load Curriculum
@@ -116,6 +119,7 @@ export function App() {
         <Header
           onOpenProfile={() => setActiveTab('leaderboard')}
           onOpenShop={() => setActiveTab('shop')}
+          onOpenAdmin={() => setShowAdminDashboard(true)}
           todayXp={todayXp}
         />
 
@@ -150,7 +154,10 @@ export function App() {
             <div className="flex flex-col">
               <LeaderboardView />
               <div className="px-4 pb-28">
-                <ProfileView onOpenAuth={() => setShowAuthModal(true)} />
+                <ProfileView
+                  onOpenAuth={() => setShowAuthModal(true)}
+                  onOpenAdmin={() => setShowAdminDashboard(true)}
+                />
               </div>
             </div>
           )}
@@ -185,6 +192,21 @@ export function App() {
         {/* Auth / Account Modal */}
         {showAuthModal && (
           <AuthModal onClose={() => setShowAuthModal(false)} />
+        )}
+
+        {/* Forced First-Time Password Change Modal */}
+        {mustChangePassword && (
+          <ChangePasswordModal />
+        )}
+
+        {/* Music Teacher Admin & Curriculum CMS Portal */}
+        {showAdminDashboard && isAdmin && (
+          <AdminDashboard
+            onClose={() => {
+              setShowAdminDashboard(false);
+              loadCurriculum();
+            }}
+          />
         )}
       </div>
     </div>

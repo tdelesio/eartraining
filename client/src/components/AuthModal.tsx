@@ -14,9 +14,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onClose }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'claim'>(
     isGuest ? 'claim' : 'login'
   );
+  const [identifier, setIdentifier] = useState('');
+  const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState(isGuest ? user?.display_name || '' : '');
+  const displayName = isGuest ? user?.display_name || '' : '';
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -27,11 +29,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onClose }) => {
 
     try {
       if (mode === 'login') {
-        await login(username, password);
+        await login(identifier, password);
       } else if (mode === 'register') {
-        await register(username, password, displayName || username);
+        await register(username, password, displayName || username, email);
       } else if (mode === 'claim') {
-        await claimAccount(username, password, displayName || username);
+        await claimAccount(username, password, displayName || username, email);
       }
       soundEngine.playSuccessChime();
       onClose();
@@ -128,54 +130,64 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onClose }) => {
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          {(mode === 'register' || mode === 'claim') && (
+          {mode === 'login' ? (
             <div>
               <label className="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">
-                Display Name
+                Email or Username
               </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Ear Trainer Extraordinaire"
-                  value={displayName}
-                  onChange={e => setDisplayName(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-            </div>
-          )}
-
-          <div>
-            <label className="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">
-              Username
-            </label>
-            <div className="relative">
               <input
                 type="text"
                 required
-                placeholder="Choose a username"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
+                placeholder="tdelesio@gmail.com or username"
+                value={identifier}
+                onChange={e => setIdentifier(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
               />
             </div>
-          </div>
+          ) : (
+            <>
+              <div>
+                <label className="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="yourname@example.com"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">
+                  Username
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Choose a username"
+                  value={username}
+                  onChange={e => setUsername(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+            </>
+          )}
 
           <div>
             <label className="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">
               Password
             </label>
-            <div className="relative">
-              <input
-                type="password"
-                required
-                placeholder="Enter password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
+            <input
+              type="password"
+              required
+              placeholder="Enter password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-semibold focus:border-emerald-500 focus:outline-none"
+            />
           </div>
 
           <button
@@ -193,7 +205,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onClose }) => {
             ) : (
               <>
                 <UserPlus className="w-4 h-4" />
-                <span>Save & Continue</span>
+                <span>Create Account</span>
               </>
             )}
           </button>

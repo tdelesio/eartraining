@@ -18,8 +18,11 @@ function generateToken(user) {
     {
       id: user.id,
       username: user.username,
+      email: user.email,
       displayName: user.display_name,
-      isGuest: user.is_guest
+      isGuest: user.is_guest,
+      role: user.role || 'user',
+      mustChangePassword: Boolean(user.must_change_password)
     },
     JWT_SECRET,
     { expiresIn: '30d' }
@@ -42,6 +45,13 @@ function authMiddleware(req, res, next) {
   }
 }
 
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Access denied: Administrator privileges required' });
+  }
+  next();
+}
+
 function optionalAuthMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -61,5 +71,6 @@ module.exports = {
   verifyPassword,
   generateToken,
   authMiddleware,
+  requireAdmin,
   optionalAuthMiddleware
 };

@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
-import { Flame, Sparkles, Trophy, Calendar, Shield, Settings, LogOut, UserPlus, Check } from 'lucide-react';
+import { Flame, Sparkles, Trophy, Calendar, Shield, Settings, LogOut, UserPlus, Check, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
 import { soundEngine } from '../audio/soundEngine';
 
 interface ProfileViewProps {
   onOpenAuth: () => void;
+  onOpenAdmin?: () => void;
 }
 
-export const ProfileView: React.FC<ProfileViewProps> = ({ onOpenAuth }) => {
-  const { user, dailyHistory, logout, setUser } = useAuth();
+export const ProfileView: React.FC<ProfileViewProps> = ({ onOpenAuth, onOpenAdmin }) => {
+  const { user, dailyHistory, logout, setUser, isAdmin } = useAuth();
   const [dailyGoal, setDailyGoal] = useState<number>(user?.daily_goal_xp || 30);
   const [savedGoalMsg, setSavedGoalMsg] = useState(false);
 
@@ -37,7 +38,29 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onOpenAuth }) => {
         </div>
 
         <h2 className="text-xl font-black text-slate-800">{user?.display_name || 'Maestro'}</h2>
-        <p className="text-xs font-bold text-slate-400 mt-0.5">@{user?.username || 'user'}</p>
+        <div className="flex items-center justify-center gap-1.5 mt-0.5">
+          <p className="text-xs font-bold text-slate-400">@{user?.username || 'user'}</p>
+          {isAdmin && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-purple-100 text-purple-700 border border-purple-200">
+              <ShieldCheck className="w-3 h-3" />
+              Admin
+            </span>
+          )}
+        </div>
+
+        {/* Admin Shortcut in Profile if user is admin */}
+        {isAdmin && onOpenAdmin && (
+          <button
+            onClick={() => {
+              soundEngine.playButtonClick();
+              onOpenAdmin();
+            }}
+            className="mt-3 w-full py-2.5 rounded-xl bg-purple-50 hover:bg-purple-100 border-2 border-purple-200 text-purple-700 font-black text-xs flex items-center justify-center gap-2 transition-colors"
+          >
+            <ShieldCheck className="w-4 h-4 text-purple-600" />
+            <span>Open Music Teacher & Admin Portal</span>
+          </button>
+        )}
 
         {isGuest && (
           <div className="mt-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-left">

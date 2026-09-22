@@ -1,16 +1,17 @@
 import React from 'react';
-import { Flame, Heart, Sparkles, User as UserIcon } from 'lucide-react';
+import { Flame, Heart, Sparkles, User as UserIcon, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { soundEngine } from '../audio/soundEngine';
 
 interface HeaderProps {
   onOpenProfile: () => void;
   onOpenShop: () => void;
+  onOpenAdmin?: () => void;
   todayXp?: number;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenProfile, onOpenShop, todayXp = 0 }) => {
-  const { user, dailyHistory } = useAuth();
+export const Header: React.FC<HeaderProps> = ({ onOpenProfile, onOpenShop, onOpenAdmin, todayXp = 0 }) => {
+  const { user, dailyHistory, isAdmin } = useAuth();
 
   const streak = user?.streak_days || 0;
   const gems = user?.gems || 0;
@@ -26,13 +27,28 @@ export const Header: React.FC<HeaderProps> = ({ onOpenProfile, onOpenShop, today
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 px-4 py-2.5 flex items-center justify-between select-none">
       {/* Brand */}
-      <div className="flex items-center gap-1.5 cursor-pointer" onClick={() => soundEngine.playButtonClick()}>
+      <div className="flex items-center gap-2 cursor-pointer" onClick={() => soundEngine.playButtonClick()}>
         <span className="text-2xl animate-pulse-subtle">🎵</span>
         <span className="font-extrabold text-xl tracking-tight text-emerald-600">CADENCE</span>
       </div>
 
-      {/* Stats Counters */}
+      {/* Stats Counters & Admin Button */}
       <div className="flex items-center gap-2 sm:gap-3">
+        {/* Admin Portal Button (Only visible to Admins) */}
+        {isAdmin && onOpenAdmin && (
+          <button
+            onClick={() => {
+              soundEngine.playButtonClick();
+              onOpenAdmin();
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 font-black text-xs transition-colors shadow-2xs"
+            title="Music Teacher & Admin Dashboard"
+          >
+            <ShieldCheck className="w-4 h-4 text-purple-600" />
+            <span className="hidden sm:inline">Admin CMS</span>
+          </button>
+        )}
+
         {/* Streak Flame */}
         <button
           onClick={() => {

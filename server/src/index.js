@@ -11,68 +11,115 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Request logging
-app.use((req, res, next) => {
-  console.log(`[API] ${req.method} ${req.path}`);
-  next();
-});
-
 // ==========================================
-// AUTH ROUTES
+// AUTHENTICATION ROUTES
 // ==========================================
 
-// Register new user
+// Register New Account
 app.post('/api/auth/register', (req, res) => {
   try {
-    const { username, password, displayName, email } = req.body;
+    const { username, email, password, displayName } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
     const cleanUsername = username.trim().toLowerCase();
-    const existing = db.getUserByUsername(cleanUsername);
-    if (existing) {
+    const cleanEmail = email ? email.trim().toLowerCase() : null;
+
+    if (cleanUsername.length < 3) {
+      return res.status(400).json({ error: 'Username must be at least 3 characters' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const existingUsername = db.getUserByUsername(cleanUsername);
+    if (existingUsername) {
       return res.status(409).json({ error: 'Username is already taken' });
+    }
+
+    if (cleanEmail) {
+      const existingEmail = db.getUserByEmail(cleanEmail);
+      if (existingEmail) {
+        return res.status(409).json({ error: 'Email is already registered' });
+      }
     }
 
     const passwordHash = auth.hashPassword(password);
     const user = db.createUser(
       cleanUsername,
-      email || null,
+      cleanEmail,
       passwordHash,
       displayName || username,
       0,
-      '🎧'
+      '🎧',
+      'user',
+      0
     );
 
     const token = auth.generateToken(user);
-    res.json({ user, token });
+    res.json({
+      user,
+      token,
+      mustChangePassword: false
+    });
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Failed to register user' });
   }
 });
 
-// Login
+// Login (Supports either Username OR Email)
 app.post('/api/auth/login', (req, res) => {
   try {
-    const { username, password } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
+    const { username, email, identifier, password } = req.body;
+    const loginIdentifier = (identifier || username || email || '').trim();
+
+    if (!loginIdentifier || !password) {
+      return res.status(400).json({ error: 'Username/Email and password are required' });
     }
 
-    const cleanUsername = username.trim().toLowerCase();
-    const userRecord = db.getUserByUsername(cleanUsername);
+    const userRecord = db.getUserByUsernameOrEmail(loginIdentifier);
     if (!userRecord || !auth.verifyPassword(password, userRecord.password_hash)) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      return res.status(401).json({ error: 'Invalid username/email or password' });
     }
 
     const user = db.getUserById(userRecord.id);
     const token = auth.generateToken(user);
-    res.json({ user, token });
+    const mustChangePassword = Boolean(userRecord.must_change_password);
+
+    res.json({
+      user,
+      token,
+      mustChangePassword
+    });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Failed to log in' });
+  }
+});
+
+// Force / Change Password
+app.post('/api/auth/change-password', auth.authMiddleware, (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const hash = auth.hashPassword(newPassword);
+    const updatedUser = db.updateUserPassword(req.user.id, hash, 0);
+    const newToken = auth.generateToken(updatedUser);
+
+    res.json({
+      success: true,
+      user: updatedUser,
+      token: newToken,
+      mustChangePassword: false
+    });
+  } catch (err) {
+    console.error('Change password error:', err);
+    res.status(500).json({ error: 'Failed to update password' });
   }
 });
 
@@ -85,9 +132,9 @@ app.post('/api/auth/guest', (req, res) => {
     const randomAvatars = ['🎧', '🎹', '🎵', '🎶', '🎷', '🎸', '🎺', '🎻'];
     const avatar = randomAvatars[Math.floor(Math.random() * randomAvatars.length)];
 
-    const user = db.createUser(guestUsername, null, null, displayName, 1, avatar);
+    const user = db.createUser(guestUsername, null, null, displayName, 1, avatar, 'user', 0);
     const token = auth.generateToken(user);
-    res.json({ user, token });
+    res.json({ user, token, mustChangePassword: false });
   } catch (err) {
     console.error('Guest creation error:', err);
     res.status(500).json({ error: 'Failed to create guest session' });
@@ -97,7 +144,7 @@ app.post('/api/auth/guest', (req, res) => {
 // Convert Guest account to permanent registered account
 app.post('/api/auth/claim', auth.authMiddleware, (req, res) => {
   try {
-    const { username, password, displayName } = req.body;
+    const { username, email, password, displayName } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
@@ -108,11 +155,18 @@ app.post('/api/auth/claim', auth.authMiddleware, (req, res) => {
       return res.status(409).json({ error: 'Username is already taken' });
     }
 
+    if (email) {
+      const existingEmail = db.getUserByEmail(email.trim().toLowerCase());
+      if (existingEmail && existingEmail.id !== req.user.id) {
+        return res.status(409).json({ error: 'Email is already registered' });
+      }
+    }
+
     const passwordHash = auth.hashPassword(password);
     const updatedUser = db.claimGuestAccount(req.user.id, cleanUsername, passwordHash, displayName || username);
     const token = auth.generateToken(updatedUser);
 
-    res.json({ user: updatedUser, token });
+    res.json({ user: updatedUser, token, mustChangePassword: false });
   } catch (err) {
     console.error('Claim guest error:', err);
     res.status(500).json({ error: 'Failed to claim account' });
@@ -136,13 +190,13 @@ app.get('/api/auth/me', auth.authMiddleware, (req, res) => {
 });
 
 // ==========================================
-// CURRICULUM & LESSON ROUTES
+// CURRICULUM & LESSON ROUTES (DB-BACKED)
 // ==========================================
 
 // Get entire curriculum tree
 app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
   try {
-    const units = curriculum.UNITS;
+    const units = db.getCurriculumTree();
     let userProgress = [];
     if (req.user) {
       userProgress = db.getUserProgress(req.user.id);
@@ -154,7 +208,6 @@ app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
       progressMap.set(`${p.unit_id}_${p.level_id}`, p);
     });
 
-    // Determine lock/unlock states (all unlocked by default for testing; can enforce sequential with UNLOCK_ALL_LEVELS=false)
     const unlockAll = process.env.UNLOCK_ALL_LEVELS !== 'false';
     let previousCompleted = true; // Unit 0 Level 0 is unlocked by default
     const unitsWithStatus = units.map((unit) => {
@@ -194,6 +247,28 @@ app.get('/api/curriculum/unit/:unitId/level/:levelId', (req, res) => {
     const unitId = parseInt(req.params.unitId, 10);
     const levelId = parseInt(req.params.levelId, 10);
 
+    // Look up from DB first
+    const dbLesson = db.getLessonByUnitAndLevel(unitId, levelId);
+    if (dbLesson) {
+      const dbUnits = db.getAllUnits();
+      const dbUnit = dbUnits.find(u => u.id === unitId) || { id: unitId, title: `Unit ${unitId}`, color: '#58cc02' };
+      const questions = curriculum.generateQuestionsForLevel(dbLesson.type, 7, dbLesson.config);
+
+      return res.json({
+        unit: { id: dbUnit.id, title: dbUnit.title, color: dbUnit.color },
+        level: {
+          id: dbLesson.level_number,
+          title: dbLesson.title,
+          description: dbLesson.description,
+          type: dbLesson.type,
+          xpReward: dbLesson.xp_reward,
+          config: dbLesson.config
+        },
+        questions
+      });
+    }
+
+    // Fallback to static UNITS
     const unit = curriculum.UNITS.find(u => u.id === unitId);
     if (!unit) return res.status(404).json({ error: 'Unit not found' });
 
@@ -217,45 +292,249 @@ app.get('/api/curriculum/unit/:unitId/level/:levelId', (req, res) => {
 app.post('/api/practice/custom', (req, res) => {
   try {
     const { mode, subType, count = 8 } = req.body;
-    // mode: 'notes' | 'chords'
-    let levelType = 'solfege_do_re_mi';
+    let questions = [];
 
     if (mode === 'notes') {
-      if (subType === 'direction') levelType = 'pitch_direction_wide';
-      else if (subType === 'direction_close') levelType = 'pitch_direction_close';
-      else if (subType === 'solfege_penta') levelType = 'solfege_pentachord_intro';
-      else if (subType === 'solfege_full') levelType = 'solfege_full_scale';
-      else if (subType === 'key_transposition') levelType = 'key_random';
-      else levelType = 'solfege_do_re_mi';
+      const typeMap = {
+        direction: 'pitch_direction_boss',
+        solfege_starter: 'solfege_do_re_mi',
+        pentachord: 'solfege_pentachord_5way',
+        full_scale: 'solfege_major_scale',
+        intervals: 'melody_do_re_mi'
+      };
+      const levelType = typeMap[subType] || 'solfege_pentachord_5way';
+      questions = curriculum.generateQuestionsForLevel(levelType, count);
     } else if (mode === 'chords') {
-      if (subType === 'triad_maj_min') levelType = 'triad_maj_min';
-      else if (subType === 'triad_all') levelType = 'triad_4way';
-      else if (subType === 'seventh_basic') levelType = 'seventh_maj_dom';
-      else if (subType === 'seventh_all') levelType = 'seventh_master';
-      else levelType = 'triad_maj_min';
+      const typeMap = {
+        triads_maj_min: 'triad_maj_min',
+        triads_all: 'triad_4way',
+        triads_arpeggio: 'triad_arpeggio',
+        sevenths_starter: 'seventh_maj_dom',
+        sevenths_all: 'seventh_master'
+      };
+      const levelType = typeMap[subType] || 'triad_maj_min';
+      questions = curriculum.generateQuestionsForLevel(levelType, count);
+    } else {
+      questions = curriculum.generateQuestionsForLevel('pitch_direction_wide', count);
     }
 
-    const questions = curriculum.generateQuestionsForLevel(levelType, count);
-    res.json({ mode, subType, levelType, questions });
+    res.json({ questions });
   } catch (err) {
-    console.error('Custom practice error:', err);
-    res.status(500).json({ error: 'Failed to generate custom practice' });
+    console.error('Practice generator error:', err);
+    res.status(500).json({ error: 'Failed to generate practice session' });
   }
 });
 
-// Complete Lesson & Save Progress
-app.post('/api/lesson/complete', auth.authMiddleware, (req, res) => {
+// ==========================================
+// ADMIN DASHBOARD & CURRICULUM CMS ROUTES
+// (Protected by authMiddleware + requireAdmin)
+// ==========================================
+
+// Get all registered users
+app.get('/api/admin/users', auth.authMiddleware, auth.requireAdmin, (req, res) => {
   try {
-    const { unitId, levelId, score, stars, xpEarned, mistakes = [] } = req.body;
-    const userId = req.user.id;
+    const users = db.getAllUsers();
+    res.json({ users });
+  } catch (err) {
+    console.error('Admin users error:', err);
+    res.status(500).json({ error: 'Failed to load users' });
+  }
+});
 
-    // Record lesson progress & streak update
-    const result = db.recordLessonProgress(userId, unitId, levelId, score, stars, xpEarned);
+// Update user role (elevate to admin or demote to user)
+app.patch('/api/admin/users/:userId/role', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const targetUserId = parseInt(req.params.userId, 10);
+    const { role } = req.body;
 
-    // Record any mistakes to power adaptive review
+    if (!['user', 'admin'].includes(role)) {
+      return res.status(400).json({ error: "Role must be 'user' or 'admin'" });
+    }
+
+    // Safety: prevent admin from demoting themselves
+    if (targetUserId === req.user.id && role !== 'admin') {
+      return res.status(400).json({ error: 'Cannot revoke your own admin status' });
+    }
+
+    const updated = db.updateUserRole(targetUserId, role);
+    if (!updated) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ user: updated });
+  } catch (err) {
+    console.error('Admin update role error:', err);
+    res.status(500).json({ error: 'Failed to update user role' });
+  }
+});
+
+// Get editable curriculum tree
+app.get('/api/admin/curriculum', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const curriculumTree = db.getCurriculumTree();
+    res.json({ curriculum: curriculumTree });
+  } catch (err) {
+    console.error('Admin get curriculum error:', err);
+    res.status(500).json({ error: 'Failed to load curriculum' });
+  }
+});
+
+// Create Unit
+app.post('/api/admin/units', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const { title, subtitle, icon, color } = req.body;
+    if (!title || !subtitle) {
+      return res.status(400).json({ error: 'Title and subtitle are required' });
+    }
+    const unit = db.createUnit({ title, subtitle, icon, color });
+    res.json({ unit });
+  } catch (err) {
+    console.error('Admin create unit error:', err);
+    res.status(500).json({ error: 'Failed to create unit' });
+  }
+});
+
+// Update Unit
+app.put('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const unitId = parseInt(req.params.unitId, 10);
+    const { title, subtitle, icon, color } = req.body;
+    const unit = db.updateUnit(unitId, { title, subtitle, icon, color });
+    res.json({ unit });
+  } catch (err) {
+    console.error('Admin update unit error:', err);
+    res.status(500).json({ error: 'Failed to update unit' });
+  }
+});
+
+// Delete Unit
+app.delete('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const unitId = parseInt(req.params.unitId, 10);
+    db.deleteUnit(unitId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Admin delete unit error:', err);
+    res.status(500).json({ error: 'Failed to delete unit' });
+  }
+});
+
+// Reorder Units
+app.post('/api/admin/units/reorder', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const { unitIds } = req.body;
+    if (!Array.isArray(unitIds)) {
+      return res.status(400).json({ error: 'unitIds must be an array' });
+    }
+    db.reorderUnits(unitIds);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Admin reorder units error:', err);
+    res.status(500).json({ error: 'Failed to reorder units' });
+  }
+});
+
+// Create Lesson in Unit
+app.post('/api/admin/units/:unitId/lessons', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const unitId = parseInt(req.params.unitId, 10);
+    const { title, description, type, config, xpReward } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description are required' });
+    }
+    const lesson = db.createLesson(unitId, {
+      title,
+      description,
+      type: type || 'custom',
+      config: config || {},
+      xpReward: xpReward || 20
+    });
+    res.json({ lesson });
+  } catch (err) {
+    console.error('Admin create lesson error:', err);
+    res.status(500).json({ error: 'Failed to create lesson' });
+  }
+});
+
+// Update Lesson
+app.put('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const lessonId = parseInt(req.params.lessonId, 10);
+    const { title, description, type, config, xpReward } = req.body;
+    const lesson = db.updateLesson(lessonId, { title, description, type, config, xpReward });
+    res.json({ lesson });
+  } catch (err) {
+    console.error('Admin update lesson error:', err);
+    res.status(500).json({ error: 'Failed to update lesson' });
+  }
+});
+
+// Delete Lesson
+app.delete('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const lessonId = parseInt(req.params.lessonId, 10);
+    db.deleteLesson(lessonId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Admin delete lesson error:', err);
+    res.status(500).json({ error: 'Failed to delete lesson' });
+  }
+});
+
+// Reorder Lessons
+app.post('/api/admin/lessons/reorder', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const { lessonIds } = req.body;
+    if (!Array.isArray(lessonIds)) {
+      return res.status(400).json({ error: 'lessonIds must be an array' });
+    }
+    db.reorderLessons(lessonIds);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Admin reorder lessons error:', err);
+    res.status(500).json({ error: 'Failed to reorder lessons' });
+  }
+});
+
+// Test Question Generator for Music Teacher Preview
+app.post('/api/admin/preview-question', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+  try {
+    const { type = 'custom', config = {} } = req.body;
+    const question = curriculum.generateSingleQuestion(type, 0, config);
+    res.json({ question });
+  } catch (err) {
+    console.error('Preview question error:', err);
+    res.status(500).json({ error: 'Failed to generate preview question' });
+  }
+});
+
+// ==========================================
+// STUDENT PROGRESS & GAMEPLAY ROUTES
+// ==========================================
+
+// Submit Lesson Completion
+app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMiddleware, (req, res) => {
+  try {
+    const { unitId, levelId, score, stars, xpEarned = 20, mistakes = [] } = req.body;
+
+    const result = db.recordLessonProgress(
+      req.user.id,
+      parseInt(unitId, 10),
+      parseInt(levelId, 10),
+      parseInt(score, 10) || 100,
+      parseInt(stars, 10) || 3,
+      parseInt(xpEarned, 10) || 20
+    );
+
     if (Array.isArray(mistakes)) {
       mistakes.forEach(m => {
-        db.recordMistake(userId, m.category || 'general', m.questionText || '', m.userAnswer || '', m.correctAnswer || '');
+        db.recordMistake(
+          req.user.id,
+          m.questionType || 'unknown',
+          m.prompt || '',
+          m.userAnswer || '',
+          m.correctAnswer || ''
+        );
       });
     }
 
@@ -267,83 +546,69 @@ app.post('/api/lesson/complete', auth.authMiddleware, (req, res) => {
     });
   } catch (err) {
     console.error('Complete lesson error:', err);
-    res.status(500).json({ error: 'Failed to complete lesson' });
+    res.status(500).json({ error: 'Failed to record lesson completion' });
   }
 });
 
-// Practice to Refill Hearts (Free, no penalty practice)
-app.post('/api/hearts/refill', auth.authMiddleware, (req, res) => {
+// Update Profile Settings
+app.patch('/api/profile/update', auth.authMiddleware, (req, res) => {
   try {
-    const profile = db.getUserById(req.user.id);
-    if (!profile) return res.status(404).json({ error: 'User not found' });
-
-    const newHearts = Math.min(profile.max_hearts, profile.hearts + 1);
-    const updated = db.updateUserProfile(req.user.id, { hearts: newHearts });
-    res.json({ user: updated });
-  } catch (err) {
-    console.error('Heart refill error:', err);
-    res.status(500).json({ error: 'Failed to refill heart' });
-  }
-});
-
-// In-App Shop Purchases (using Gems)
-app.post('/api/shop/purchase', auth.authMiddleware, (req, res) => {
-  try {
-    const { itemType } = req.body;
-    const user = db.getUserById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (itemType === 'full_hearts') {
-      const COST = 100;
-      if (user.gems < COST) return res.status(400).json({ error: 'Not enough gems' });
-      const updated = db.updateUserProfile(user.id, {
-        gems: user.gems - COST,
-        hearts: user.max_hearts
-      });
-      return res.json({ user: updated, message: 'Hearts fully restored! ❤️❤️❤️❤️❤️' });
-    }
-
-    if (itemType === 'streak_freeze') {
-      const COST = 150;
-      if (user.gems < COST) return res.status(400).json({ error: 'Not enough gems' });
-      const updated = db.updateUserProfile(user.id, {
-        gems: user.gems - COST,
-        streak_freezes: user.streak_freezes + 1
-      });
-      return res.json({ user: updated, message: 'Streak Freeze purchased! 🧊' });
-    }
-
-    if (['sound_rhodes', 'sound_synth', 'sound_marimba'].includes(itemType)) {
-      const COST = 200;
-      const soundPreset = itemType.replace('sound_', '');
-      if (user.gems < COST) return res.status(400).json({ error: 'Not enough gems' });
-      const updated = db.updateUserProfile(user.id, {
-        gems: user.gems - COST,
-        sound_preset: soundPreset
-      });
-      return res.json({ user: updated, message: `Sound theme set to ${soundPreset}! 🎶` });
-    }
-
-    res.status(400).json({ error: 'Unknown shop item' });
-  } catch (err) {
-    console.error('Shop purchase error:', err);
-    res.status(500).json({ error: 'Failed to process purchase' });
-  }
-});
-
-// Update Profile Settings (e.g. sound preset, daily goal)
-app.post('/api/profile/update', auth.authMiddleware, (req, res) => {
-  try {
-    const { soundPreset, dailyGoalXp } = req.body;
+    const { displayName, avatar, soundPreset, dailyGoalXp } = req.body;
     const updates = {};
     if (soundPreset) updates.sound_preset = soundPreset;
     if (dailyGoalXp) updates.daily_goal_xp = parseInt(dailyGoalXp, 10);
 
-    const updated = db.updateUserProfile(req.user.id, updates);
-    res.json({ user: updated });
+    const updatedUser = db.updateUserProfile(req.user.id, updates);
+    res.json({ user: updatedUser });
   } catch (err) {
     console.error('Profile update error:', err);
     res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Refill Hearts with Gems
+app.post('/api/shop/refill-hearts', auth.authMiddleware, (req, res) => {
+  try {
+    const user = db.getUserById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const HEART_COST = 50;
+    if (user.gems < HEART_COST) {
+      return res.status(400).json({ error: 'Not enough gems to refill hearts' });
+    }
+
+    const updated = db.updateUserProfile(req.user.id, {
+      gems: user.gems - HEART_COST,
+      hearts: user.max_hearts
+    });
+
+    res.json({ success: true, user: updated });
+  } catch (err) {
+    console.error('Refill hearts error:', err);
+    res.status(500).json({ error: 'Failed to refill hearts' });
+  }
+});
+
+// Purchase Streak Freeze
+app.post('/api/shop/buy-freeze', auth.authMiddleware, (req, res) => {
+  try {
+    const user = db.getUserById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const FREEZE_COST = 100;
+    if (user.gems < FREEZE_COST) {
+      return res.status(400).json({ error: 'Not enough gems to purchase a freeze' });
+    }
+
+    const updated = db.updateUserProfile(req.user.id, {
+      gems: user.gems - FREEZE_COST,
+      streak_freezes: user.streak_freezes + 1
+    });
+
+    res.json({ success: true, user: updated });
+  } catch (err) {
+    console.error('Buy freeze error:', err);
+    res.status(500).json({ error: 'Failed to buy streak freeze' });
   }
 });
 
@@ -351,7 +616,6 @@ app.post('/api/profile/update', auth.authMiddleware, (req, res) => {
 app.get('/api/leaderboard', (req, res) => {
   try {
     const board = db.getLeaderboard();
-    // Fill with friendly simulated bot rivals if fewer than 5 registered users
     const mockRivals = [
       { id: -1, display_name: 'Wolfgang M.', avatar: '🎼', xp: 450, streak_days: 12 },
       { id: -2, display_name: 'Clara S.', avatar: '🎹', xp: 380, streak_days: 8 },

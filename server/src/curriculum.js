@@ -310,20 +310,232 @@ function noteNameToMidi(name) {
   return (oct + 1) * 12 + index;
 }
 
-// Generate question sets dynamically based on level type
-function generateQuestionsForLevel(type, count = 7) {
+const INTERVAL_NAMES = {
+  1: { name: 'Minor 2nd', short: 'm2' },
+  2: { name: 'Major 2nd', short: 'M2' },
+  3: { name: 'Minor 3rd', short: 'm3' },
+  4: { name: 'Major 3rd', short: 'M3' },
+  5: { name: 'Perfect 4th', short: 'P4' },
+  6: { name: 'Tritone', short: 'TT' },
+  7: { name: 'Perfect 5th', short: 'P5' },
+  8: { name: 'Minor 6th', short: 'm6' },
+  9: { name: 'Major 6th', short: 'M6' },
+  10: { name: 'Minor 7th', short: 'm7' },
+  11: { name: 'Major 7th', short: 'M7' },
+  12: { name: 'Octave', short: 'P8' }
+};
+
+// Generate question sets dynamically based on level type and optional teacher config
+function generateQuestionsForLevel(type, count = 7, config = {}) {
   const questions = [];
 
   for (let i = 0; i < count; i++) {
-    questions.push(generateSingleQuestion(type, i));
+    questions.push(generateSingleQuestion(type, i, config));
   }
 
   return questions;
 }
 
-function generateSingleQuestion(type, index = 0) {
+function generateSingleQuestion(type, index = 0, config = {}) {
   const randChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  // DYNAMIC TEACHER-CONFIGURED LESSONS
+  if (type === 'custom' || (config && typeof config === 'object' && Object.keys(config).length > 0)) {
+    const category = config.category || 'solfege';
+    const complexity = config.complexity || 'medium';
+
+    if (category === 'solfege') {
+      const defaultSyllables = ['Do', 'Re', 'Mi', 'Fa', 'Sol', 'La', 'Ti'];
+      const allowedSyllables = Array.isArray(config.notesPool) && config.notesPool.length >= 2 
+        ? config.notesPool 
+        : defaultSyllables;
+      
+      const filteredScale = SOLFEGE_SCALE.filter(s => allowedSyllables.includes(s.syllable));
+      const pool = filteredScale.length >= 2 ? filteredScale : SOLFEGE_SCALE;
+      const chosen = randChoice(pool);
+
+      const optionsCount = complexity === 'easy' ? 2 : (complexity === 'medium' ? 3 : Math.min(4, pool.length));
+      const otherOptions = pool.filter(s => s.syllable !== chosen.syllable).sort(() => Math.random() - 0.5).slice(0, optionsCount - 1);
+      const allOptions = [chosen, ...otherOptions].sort(() => Math.random() - 0.5);
+
+      const keyCenter = config.keyCenter || 'C';
+      const rootMidi = noteNameToMidi(`${keyCenter}4`);
+      const targetMidi = rootMidi + chosen.semitones;
+      const targetNoteName = midiToNoteName(targetMidi);
+      const tonicNoteName = `${keyCenter}4`;
+
+      return {
+        id: `teacher_solf_${index}_${Date.now()}`,
+        category: 'solfege',
+        questionText: `Key of ${keyCenter}: Identify this Solfège note (${complexity.toUpperCase()}):`,
+        tonicDrone: tonicNoteName,
+        audioPrompt: {
+          type: 'note',
+          notes: [targetNoteName],
+          durations: [1.1]
+        },
+        options: allOptions.map(o => ({
+          id: o.syllable,
+          label: `${o.syllable} (${midiToNoteName(rootMidi + o.semitones)})`,
+          isCorrect: o.syllable === chosen.syllable
+        })),
+        explanation: `In the key of ${keyCenter}, the note played was ${chosen.syllable} (${targetNoteName}).`,
+        comparison: {
+          playedNotes: [targetNoteName],
+          correctLabel: chosen.syllable
+        }
+      };
+    }
+
+    if (category === 'triad') {
+      const allowedChords = Array.isArray(config.chordPool) && config.chordPool.length >= 2
+        ? config.chordPool
+        : ['major', 'minor', 'diminished', 'augmented'];
+      const chosenKey = randChoice(allowedChords);
+      const chordInfo = CHORD_FORMULAS[chosenKey] || CHORD_FORMULAS.major;
+      const rootMidi = randInt(55, 65);
+      const rootName = midiToNoteName(rootMidi);
+      const chordNotes = chordInfo.intervals.map(offset => midiToNoteName(rootMidi + offset));
+      
+      const playStyle = config.playStyle || (complexity === 'easy' ? 'arpeggio' : 'chord');
+      const isArp = playStyle === 'arpeggio' || (playStyle === 'both' && Math.random() > 0.5);
+
+      const options = allowedChords.map(cKey => ({
+        id: cKey,
+        label: `${CHORD_FORMULAS[cKey]?.label || cKey}`,
+        isCorrect: cKey === chosenKey
+      }));
+
+      return {
+        id: `teacher_triad_${index}_${Date.now()}`,
+        category: 'chord',
+        questionText: isArp ? 'Identify the arpeggiated triad quality:' : 'Identify the chord quality:',
+        audioPrompt: {
+          type: isArp ? 'sequence' : 'chord',
+          notes: chordNotes,
+          durations: isArp ? [0.4, 0.4, 0.7] : [1.3],
+          delays: isArp ? [0, 0.4, 0.8] : [0]
+        },
+        options,
+        explanation: `This was a ${chordInfo.label} on root ${rootName}. Mood: ${chordInfo.mood}.`,
+        comparison: {
+          playedNotes: chordNotes,
+          correctLabel: chordInfo.label
+        }
+      };
+    }
+
+    if (category === 'seventh') {
+      const allowed7ths = Array.isArray(config.seventhPool) && config.seventhPool.length >= 2
+        ? config.seventhPool
+        : ['maj7', 'dom7', 'min7', 'dim7'];
+      const chosenKey = randChoice(allowed7ths);
+      const chordInfo = CHORD_FORMULAS[chosenKey] || CHORD_FORMULAS.dom7;
+      const rootMidi = randInt(55, 64);
+      const rootName = midiToNoteName(rootMidi);
+      const chordNotes = chordInfo.intervals.map(offset => midiToNoteName(rootMidi + offset));
+
+      const options = allowed7ths.map(sKey => ({
+        id: sKey,
+        label: `${CHORD_FORMULAS[sKey]?.label || sKey}`,
+        isCorrect: sKey === chosenKey
+      }));
+
+      return {
+        id: `teacher_7th_${index}_${Date.now()}`,
+        category: 'seventh_chord',
+        questionText: 'Listen to this 7th chord. What is its quality?',
+        audioPrompt: {
+          type: 'chord',
+          notes: chordNotes,
+          durations: [1.4],
+          delays: [0]
+        },
+        options,
+        explanation: `This was a ${chordInfo.label} on root ${rootName}. Vibe: ${chordInfo.mood}.`,
+        comparison: {
+          playedNotes: chordNotes,
+          correctLabel: chordInfo.label
+        }
+      };
+    }
+
+    if (category === 'interval') {
+      const allowedIntervals = Array.isArray(config.intervalPool) && config.intervalPool.length >= 2
+        ? config.intervalPool
+        : [1, 2, 3, 4, 5, 7, 12];
+      const chosenSemitones = randChoice(allowedIntervals);
+      const intervalInfo = INTERVAL_NAMES[chosenSemitones] || { name: `${chosenSemitones} Semitones`, short: `${chosenSemitones}st` };
+      
+      const rootMidi = randInt(55, 65);
+      const targetMidi = rootMidi + chosenSemitones;
+      const rootName = midiToNoteName(rootMidi);
+      const targetName = midiToNoteName(targetMidi);
+
+      const direction = config.direction || (complexity === 'hard' ? 'harmonic' : 'ascending');
+      const isHarmonic = direction === 'harmonic';
+
+      const optionsCount = complexity === 'easy' ? 2 : (complexity === 'medium' ? 3 : 4);
+      const otherIntervals = allowedIntervals.filter(i => i !== chosenSemitones).sort(() => Math.random() - 0.5).slice(0, optionsCount - 1);
+      const allIntervals = [chosenSemitones, ...otherIntervals].sort((a, b) => a - b);
+
+      return {
+        id: `teacher_int_${index}_${Date.now()}`,
+        category: 'interval',
+        questionText: isHarmonic ? 'Identify this harmonic interval (notes played together):' : 'Identify this interval (notes played in sequence):',
+        audioPrompt: {
+          type: isHarmonic ? 'chord' : 'sequence',
+          notes: [rootName, targetName],
+          durations: isHarmonic ? [1.3] : [0.6, 0.7],
+          delays: isHarmonic ? [0] : [0, 0.6]
+        },
+        options: allIntervals.map(i => ({
+          id: String(i),
+          label: INTERVAL_NAMES[i]?.name || `${i} Semitones`,
+          isCorrect: i === chosenSemitones
+        })),
+        explanation: `The interval was a ${intervalInfo.name} (${chosenSemitones} semitones) from ${rootName} to ${targetName}.`,
+        comparison: {
+          playedNotes: [rootName, targetName],
+          correctLabel: intervalInfo.name
+        }
+      };
+    }
+
+    if (category === 'pitch_direction') {
+      let intervalSemitones = 7;
+      if (complexity === 'easy') intervalSemitones = randChoice([7, 8, 12]);
+      else if (complexity === 'medium') intervalSemitones = randChoice([3, 4, 5]);
+      else if (complexity === 'hard') intervalSemitones = randChoice([1, 2]);
+      else intervalSemitones = randChoice([1, 2, 3, 5, 7, 12]);
+
+      const baseMidi = randInt(55, 67);
+      const isHigher = Math.random() > 0.5;
+      const targetMidi = isHigher ? baseMidi + intervalSemitones : baseMidi - intervalSemitones;
+
+      return {
+        id: `teacher_pd_${index}_${Date.now()}`,
+        category: 'direction',
+        questionText: 'Is the second note HIGHER or LOWER than the first?',
+        audioPrompt: {
+          type: 'sequence',
+          notes: [midiToNoteName(baseMidi), midiToNoteName(targetMidi)],
+          durations: [0.6, 0.7],
+          delays: [0, 0.7]
+        },
+        options: [
+          { id: 'higher', label: 'Higher ⬆️', isCorrect: isHigher },
+          { id: 'lower', label: 'Lower ⬇️', isCorrect: !isHigher }
+        ],
+        explanation: `The second note was ${isHigher ? 'Higher' : 'Lower'} (${midiToNoteName(targetMidi)} vs ${midiToNoteName(baseMidi)}).`,
+        comparison: {
+          playedNotes: [midiToNoteName(baseMidi), midiToNoteName(targetMidi)],
+          correctLabel: isHigher ? 'Higher ⬆️' : 'Lower ⬇️'
+        }
+      };
+    }
+  }
 
   // 1. PITCH DIRECTION
   if (type.startsWith('pitch_direction')) {
@@ -700,6 +912,7 @@ module.exports = {
   CHORD_FORMULAS,
   SOLFEGE_SCALE,
   NOTE_FREQUENCIES,
+  INTERVAL_NAMES,
   generateQuestionsForLevel,
   generateSingleQuestion,
   midiToNoteName,

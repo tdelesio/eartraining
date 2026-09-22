@@ -479,6 +479,23 @@ class SoundEngine {
     osc.start(startTime);
     osc.stop(startTime + 0.04);
   }
+
+  // Helper to play any AudioPrompt object directly
+  public playQuestionPrompt(prompt: { type: 'note' | 'chord' | 'sequence'; notes: string[]; durations?: number[]; delays?: number[] }, tonicDrone?: string) {
+    if (tonicDrone) {
+      this.playTonicDrone(tonicDrone, 3.5);
+    }
+    const offset = tonicDrone ? 0.35 : 0;
+    setTimeout(() => {
+      if (prompt.type === 'note' && prompt.notes.length > 0) {
+        this.playNote(prompt.notes[0], prompt.durations?.[0] || 1.0, 0);
+      } else if (prompt.type === 'chord') {
+        this.playChord(prompt.notes, prompt.durations?.[0] || 1.3, prompt.delays?.[1] || 0);
+      } else if (prompt.type === 'sequence') {
+        this.playSequence(prompt.notes, prompt.durations, prompt.delays);
+      }
+    }, offset * 1000);
+  }
 }
 
 export const soundEngine = new SoundEngine();
