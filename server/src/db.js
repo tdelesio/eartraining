@@ -574,18 +574,20 @@ function reorderUnits(unitIdsInOrder) {
 function seedInitialAdmin() {
   const existing = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get('tdelesio@gmail.com', 'tdelesio');
   if (!existing) {
+    const initialPassword = process.env.INITIAL_ADMIN_PASSWORD || 'password';
+    const mustChange = process.env.INITIAL_ADMIN_MUST_CHANGE_PASSWORD === 'false' ? 0 : 1;
     const salt = bcrypt.genSaltSync(10);
-    const hash = bcrypt.hashSync('password', salt);
+    const hash = bcrypt.hashSync(initialPassword, salt);
     const res = db.prepare(`
       INSERT INTO users (username, email, password_hash, display_name, avatar, is_guest, role, must_change_password)
-      VALUES (?, ?, ?, ?, ?, 0, 'admin', 1)
-    `).run('tdelesio', 'tdelesio@gmail.com', hash, 'Tim Delesio', '🎵');
+      VALUES (?, ?, ?, ?, ?, 0, 'admin', ?)
+    `).run('tdelesio', 'tdelesio@gmail.com', hash, 'Tim Delesio', '🎵', mustChange);
     const userId = Number(res.lastInsertRowid);
     db.prepare(`
       INSERT INTO user_profiles (user_id, xp, gems, hearts, max_hearts, streak_days, longest_streak, daily_goal_xp, streak_freezes, sound_preset)
       VALUES (?, 150, 500, 5, 5, 1, 1, 30, 2, 'grand_piano')
     `).run(userId);
-    console.log('Seeded initial admin user: tdelesio@gmail.com (Password: password, must_change_password: 1)');
+    console.log(`Seeded initial admin user: tdelesio@gmail.com (Password: ${initialPassword === 'password' ? 'password' : '***'}, must_change_password: ${mustChange})`);
   } else if (existing.role !== 'admin') {
     // Ensure tdelesio has admin role if already registered
     db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(existing.id);

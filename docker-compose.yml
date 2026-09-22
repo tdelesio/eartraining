@@ -1,0 +1,14 @@
+services:
+  cadence:
+    image: tdelesio/eartraining:latest
+    container_name: eartraining
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - cadence_data:/app/server/data
+    env_file:
+      - .env
+
+volumes:
+  cadence_data:
