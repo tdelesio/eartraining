@@ -16,7 +16,7 @@ app.use(express.json());
 // ==========================================
 
 // Register New Account
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, password, displayName } = req.body;
     if (!username || !password) {
@@ -33,20 +33,20 @@ app.post('/api/auth/register', (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    const existingUsername = db.getUserByUsername(cleanUsername);
+    const existingUsername = await db.getUserByUsername(cleanUsername);
     if (existingUsername) {
       return res.status(409).json({ error: 'Username is already taken' });
     }
 
     if (cleanEmail) {
-      const existingEmail = db.getUserByEmail(cleanEmail);
+      const existingEmail = await db.getUserByEmail(cleanEmail);
       if (existingEmail) {
         return res.status(409).json({ error: 'Email is already registered' });
       }
     }
 
     const passwordHash = auth.hashPassword(password);
-    const user = db.createUser(
+    const user = await db.createUser(
       cleanUsername,
       cleanEmail,
       passwordHash,
@@ -70,7 +70,7 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 // Login (Supports either Username OR Email)
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, email, identifier, password } = req.body;
     const loginIdentifier = (identifier || username || email || '').trim();
@@ -79,12 +79,12 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(400).json({ error: 'Username/Email and password are required' });
     }
 
-    const userRecord = db.getUserByUsernameOrEmail(loginIdentifier);
+    const userRecord = await db.getUserByUsernameOrEmail(loginIdentifier);
     if (!userRecord || !auth.verifyPassword(password, userRecord.password_hash)) {
       return res.status(401).json({ error: 'Invalid username/email or password' });
     }
 
-    const user = db.getUserById(userRecord.id);
+    const user = await db.getUserById(userRecord.id);
     const token = auth.generateToken(user);
     const mustChangePassword = Boolean(userRecord.must_change_password);
 
@@ -100,7 +100,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Force / Change Password
-app.post('/api/auth/change-password', auth.authMiddleware, (req, res) => {
+app.post('/api/auth/change-password', auth.authMiddleware, async (req, res) => {
   try {
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 6) {
@@ -108,7 +108,7 @@ app.post('/api/auth/change-password', auth.authMiddleware, (req, res) => {
     }
 
     const hash = auth.hashPassword(newPassword);
-    const updatedUser = db.updateUserPassword(req.user.id, hash, 0);
+    const updatedUser = await db.updateUserPassword(req.user.id, hash, 0);
     const newToken = auth.generateToken(updatedUser);
 
     res.json({
@@ -124,7 +124,7 @@ app.post('/api/auth/change-password', auth.authMiddleware, (req, res) => {
 });
 
 // Instant Guest Login (1-click fast start)
-app.post('/api/auth/guest', (req, res) => {
+app.post('/api/auth/guest', async (req, res) => {
   try {
     const guestNumber = Math.floor(1000 + Math.random() * 9000);
     const guestUsername = `guest_${Date.now()}_${guestNumber}`;
@@ -132,7 +132,7 @@ app.post('/api/auth/guest', (req, res) => {
     const randomAvatars = ['🎧', '🎹', '🎵', '🎶', '🎷', '🎸', '🎺', '🎻'];
     const avatar = randomAvatars[Math.floor(Math.random() * randomAvatars.length)];
 
-    const user = db.createUser(guestUsername, null, null, displayName, 1, avatar, 'user', 0);
+    const user = await db.createUser(guestUsername, null, null, displayName, 1, avatar, 'user', 0);
     const token = auth.generateToken(user);
     res.json({ user, token, mustChangePassword: false });
   } catch (err) {
@@ -142,7 +142,7 @@ app.post('/api/auth/guest', (req, res) => {
 });
 
 // Convert Guest account to permanent registered account
-app.post('/api/auth/claim', auth.authMiddleware, (req, res) => {
+app.post('/api/auth/claim', auth.authMiddleware, async (req, res) => {
   try {
     const { username, email, password, displayName } = req.body;
     if (!username || !password) {
@@ -150,20 +150,20 @@ app.post('/api/auth/claim', auth.authMiddleware, (req, res) => {
     }
 
     const cleanUsername = username.trim().toLowerCase();
-    const existing = db.getUserByUsername(cleanUsername);
+    const existing = await db.getUserByUsername(cleanUsername);
     if (existing && existing.id !== req.user.id) {
       return res.status(409).json({ error: 'Username is already taken' });
     }
 
     if (email) {
-      const existingEmail = db.getUserByEmail(email.trim().toLowerCase());
+      const existingEmail = await db.getUserByEmail(email.trim().toLowerCase());
       if (existingEmail && existingEmail.id !== req.user.id) {
         return res.status(409).json({ error: 'Email is already registered' });
       }
     }
 
     const passwordHash = auth.hashPassword(password);
-    const updatedUser = db.claimGuestAccount(req.user.id, cleanUsername, passwordHash, displayName || username);
+    const updatedUser = await db.claimGuestAccount(req.user.id, cleanUsername, passwordHash, displayName || username);
     const token = auth.generateToken(updatedUser);
 
     res.json({ user: updatedUser, token, mustChangePassword: false });
@@ -174,14 +174,14 @@ app.post('/api/auth/claim', auth.authMiddleware, (req, res) => {
 });
 
 // Get Current User Profile & Progress
-app.get('/api/auth/me', auth.authMiddleware, (req, res) => {
+app.get('/api/auth/me', auth.authMiddleware, async (req, res) => {
   try {
-    const user = db.getUserById(req.user.id);
+    const user = await db.getUserById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    const progress = db.getUserProgress(req.user.id);
-    const dailyHistory = db.getDailyHistory(req.user.id, 14);
+    const progress = await db.getUserProgress(req.user.id);
+    const dailyHistory = await db.getDailyHistory(req.user.id, 14);
     res.json({ user, progress, dailyHistory });
   } catch (err) {
     console.error('Me error:', err);
@@ -194,12 +194,12 @@ app.get('/api/auth/me', auth.authMiddleware, (req, res) => {
 // ==========================================
 
 // Get entire curriculum tree
-app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
+app.get('/api/curriculum', auth.optionalAuthMiddleware, async (req, res) => {
   try {
-    const units = db.getCurriculumTree();
+    const units = await db.getCurriculumTree();
     let userProgress = [];
     if (req.user && req.user.is_guest !== 1 && req.user.isGuest !== 1) {
-      userProgress = db.getUserProgress(req.user.id);
+      userProgress = await db.getUserProgress(req.user.id);
     }
 
     // Merge progress into curriculum structure
@@ -242,15 +242,15 @@ app.get('/api/curriculum', auth.optionalAuthMiddleware, (req, res) => {
 });
 
 // Get questions for a specific curriculum lesson
-app.get('/api/curriculum/unit/:unitId/level/:levelId', (req, res) => {
+app.get('/api/curriculum/unit/:unitId/level/:levelId', async (req, res) => {
   try {
     const unitId = parseInt(req.params.unitId, 10);
     const levelId = parseInt(req.params.levelId, 10);
 
     // Look up from DB first
-    const dbLesson = db.getLessonByUnitAndLevel(unitId, levelId);
+    const dbLesson = await db.getLessonByUnitAndLevel(unitId, levelId);
     if (dbLesson) {
-      const dbUnits = db.getAllUnits();
+      const dbUnits = await db.getAllUnits();
       const dbUnit = dbUnits.find(u => u.id === unitId) || { id: unitId, title: `Unit ${unitId}`, color: '#58cc02' };
       const questions = curriculum.generateQuestionsForLevel(dbLesson.type, 7, dbLesson.config);
 
@@ -298,42 +298,47 @@ app.post('/api/practice/custom', (req, res) => {
       const typeMap = {
         direction: 'pitch_direction_boss',
         solfege_starter: 'solfege_do_re_mi',
-        pentachord: 'solfege_pentachord_5way',
-        full_scale: 'solfege_major_scale',
-        intervals: 'melody_do_re_mi'
+        solfege_pentatonic: 'solfege_pentatonic',
+        diatonic_scale: 'diatonic_scale_degrees',
+        perfect_octave: 'perfect_octave_discovery',
+        intervals_stepwise: 'stepwise_intervals',
+        intervals_all: 'interval_challenge'
       };
-      const levelType = typeMap[subType] || 'solfege_pentachord_5way';
-      questions = curriculum.generateQuestionsForLevel(levelType, count);
+      const resolvedType = typeMap[subType] || 'diatonic_scale_degrees';
+      questions = curriculum.generateQuestionsForLevel(resolvedType, count);
     } else if (mode === 'chords') {
       const typeMap = {
-        triads_maj_min: 'triad_maj_min',
-        triads_all: 'triad_4way',
-        triads_arpeggio: 'triad_arpeggio',
-        sevenths_starter: 'seventh_maj_dom',
-        sevenths_all: 'seventh_master'
+        major_minor: 'major_vs_minor_chords',
+        diminished_augmented: 'dim_aug_color',
+        four_qualities: 'four_chord_qualities',
+        chord_inversions: 'triad_inversions'
       };
-      const levelType = typeMap[subType] || 'triad_maj_min';
-      questions = curriculum.generateQuestionsForLevel(levelType, count);
+      const resolvedType = typeMap[subType] || 'major_vs_minor_chords';
+      questions = curriculum.generateQuestionsForLevel(resolvedType, count);
     } else {
-      questions = curriculum.generateQuestionsForLevel('pitch_direction_wide', count);
+      questions = curriculum.generateQuestionsForLevel('diatonic_scale_degrees', count);
     }
 
-    res.json({ questions });
+    res.json({
+      unit: { id: -1, title: 'Custom Practice', color: '#3b82f6' },
+      level: { id: -1, title: `${mode === 'chords' ? 'Chord' : 'Note'} Practice`, xpReward: 15 },
+      questions
+    });
   } catch (err) {
-    console.error('Practice generator error:', err);
+    console.error('Custom practice generation error:', err);
     res.status(500).json({ error: 'Failed to generate practice session' });
   }
 });
 
 // ==========================================
-// ADMIN DASHBOARD & CURRICULUM CMS ROUTES
+// ADMIN & CURRICULUM CMS API ROUTES
 // (Protected by authMiddleware + requireAdmin)
 // ==========================================
 
 // Get all registered users
-app.get('/api/admin/users', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.get('/api/admin/users', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
-    const users = db.getAllUsers();
+    const users = await db.getAllUsers();
     res.json({ users });
   } catch (err) {
     console.error('Admin users error:', err);
@@ -342,7 +347,7 @@ app.get('/api/admin/users', auth.authMiddleware, auth.requireAdmin, (req, res) =
 });
 
 // Update user role (elevate to admin or demote to user)
-app.patch('/api/admin/users/:userId/role', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.patch('/api/admin/users/:userId/role', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const targetUserId = parseInt(req.params.userId, 10);
     const { role } = req.body;
@@ -356,7 +361,7 @@ app.patch('/api/admin/users/:userId/role', auth.authMiddleware, auth.requireAdmi
       return res.status(400).json({ error: 'Cannot revoke your own admin status' });
     }
 
-    const updated = db.updateUserRole(targetUserId, role);
+    const updated = await db.updateUserRole(targetUserId, role);
     if (!updated) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -369,9 +374,9 @@ app.patch('/api/admin/users/:userId/role', auth.authMiddleware, auth.requireAdmi
 });
 
 // Get editable curriculum tree
-app.get('/api/admin/curriculum', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.get('/api/admin/curriculum', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
-    const curriculumTree = db.getCurriculumTree();
+    const curriculumTree = await db.getCurriculumTree();
     res.json({ curriculum: curriculumTree });
   } catch (err) {
     console.error('Admin get curriculum error:', err);
@@ -380,13 +385,13 @@ app.get('/api/admin/curriculum', auth.authMiddleware, auth.requireAdmin, (req, r
 });
 
 // Create Unit
-app.post('/api/admin/units', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.post('/api/admin/units', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const { title, subtitle, icon, color } = req.body;
     if (!title || !subtitle) {
       return res.status(400).json({ error: 'Title and subtitle are required' });
     }
-    const unit = db.createUnit({ title, subtitle, icon, color });
+    const unit = await db.createUnit({ title, subtitle, icon, color });
     res.json({ unit });
   } catch (err) {
     console.error('Admin create unit error:', err);
@@ -395,11 +400,11 @@ app.post('/api/admin/units', auth.authMiddleware, auth.requireAdmin, (req, res) 
 });
 
 // Update Unit
-app.put('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.put('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const unitId = parseInt(req.params.unitId, 10);
     const { title, subtitle, icon, color } = req.body;
-    const unit = db.updateUnit(unitId, { title, subtitle, icon, color });
+    const unit = await db.updateUnit(unitId, { title, subtitle, icon, color });
     res.json({ unit });
   } catch (err) {
     console.error('Admin update unit error:', err);
@@ -408,10 +413,10 @@ app.put('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (req
 });
 
 // Delete Unit
-app.delete('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.delete('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const unitId = parseInt(req.params.unitId, 10);
-    db.deleteUnit(unitId);
+    await db.deleteUnit(unitId);
     res.json({ success: true });
   } catch (err) {
     console.error('Admin delete unit error:', err);
@@ -420,13 +425,13 @@ app.delete('/api/admin/units/:unitId', auth.authMiddleware, auth.requireAdmin, (
 });
 
 // Reorder Units
-app.post('/api/admin/units/reorder', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.post('/api/admin/units/reorder', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const { unitIds } = req.body;
     if (!Array.isArray(unitIds)) {
       return res.status(400).json({ error: 'unitIds must be an array' });
     }
-    db.reorderUnits(unitIds);
+    await db.reorderUnits(unitIds);
     res.json({ success: true });
   } catch (err) {
     console.error('Admin reorder units error:', err);
@@ -435,14 +440,14 @@ app.post('/api/admin/units/reorder', auth.authMiddleware, auth.requireAdmin, (re
 });
 
 // Create Lesson in Unit
-app.post('/api/admin/units/:unitId/lessons', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.post('/api/admin/units/:unitId/lessons', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const unitId = parseInt(req.params.unitId, 10);
     const { title, description, type, config, xpReward } = req.body;
     if (!title || !description) {
       return res.status(400).json({ error: 'Title and description are required' });
     }
-    const lesson = db.createLesson(unitId, {
+    const lesson = await db.createLesson(unitId, {
       title,
       description,
       type: type || 'custom',
@@ -457,11 +462,11 @@ app.post('/api/admin/units/:unitId/lessons', auth.authMiddleware, auth.requireAd
 });
 
 // Update Lesson
-app.put('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.put('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const lessonId = parseInt(req.params.lessonId, 10);
     const { title, description, type, config, xpReward } = req.body;
-    const lesson = db.updateLesson(lessonId, { title, description, type, config, xpReward });
+    const lesson = await db.updateLesson(lessonId, { title, description, type, config, xpReward });
     res.json({ lesson });
   } catch (err) {
     console.error('Admin update lesson error:', err);
@@ -470,10 +475,10 @@ app.put('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, 
 });
 
 // Delete Lesson
-app.delete('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.delete('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const lessonId = parseInt(req.params.lessonId, 10);
-    db.deleteLesson(lessonId);
+    await db.deleteLesson(lessonId);
     res.json({ success: true });
   } catch (err) {
     console.error('Admin delete lesson error:', err);
@@ -482,13 +487,13 @@ app.delete('/api/admin/lessons/:lessonId', auth.authMiddleware, auth.requireAdmi
 });
 
 // Reorder Lessons
-app.post('/api/admin/lessons/reorder', auth.authMiddleware, auth.requireAdmin, (req, res) => {
+app.post('/api/admin/lessons/reorder', auth.authMiddleware, auth.requireAdmin, async (req, res) => {
   try {
     const { lessonIds } = req.body;
     if (!Array.isArray(lessonIds)) {
       return res.status(400).json({ error: 'lessonIds must be an array' });
     }
-    db.reorderLessons(lessonIds);
+    await db.reorderLessons(lessonIds);
     res.json({ success: true });
   } catch (err) {
     console.error('Admin reorder lessons error:', err);
@@ -513,23 +518,24 @@ app.post('/api/admin/preview-question', auth.authMiddleware, auth.requireAdmin, 
 // ==========================================
 
 // Submit Lesson Completion
-app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMiddleware, (req, res) => {
+app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMiddleware, async (req, res) => {
   try {
     const { unitId, levelId, score, stars, xpEarned = 20, mistakes = [] } = req.body;
 
     // Do NOT track progress as a guest
     if (req.user && (req.user.is_guest === 1 || req.user.isGuest === 1)) {
+      const guestUser = await db.getUserById(req.user.id);
       return res.json({
         success: true,
         isGuest: true,
         message: 'Guest session: progress is not tracked',
-        user: db.getUserById(req.user.id),
+        user: guestUser,
         streakResult: null,
         progress: []
       });
     }
 
-    const result = db.recordLessonProgress(
+    const result = await db.recordLessonProgress(
       req.user.id,
       parseInt(unitId, 10),
       parseInt(levelId, 10),
@@ -539,15 +545,15 @@ app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMid
     );
 
     if (Array.isArray(mistakes)) {
-      mistakes.forEach(m => {
-        db.recordMistake(
+      for (const m of mistakes) {
+        await db.recordMistake(
           req.user.id,
           m.questionType || 'unknown',
           m.prompt || '',
           m.userAnswer || '',
           m.correctAnswer || ''
         );
-      });
+      }
     }
 
     res.json({
@@ -563,14 +569,14 @@ app.post(['/api/progress/complete-lesson', '/api/lesson/complete'], auth.authMid
 });
 
 // Update Profile Settings
-app.patch('/api/profile/update', auth.authMiddleware, (req, res) => {
+app.patch('/api/profile/update', auth.authMiddleware, async (req, res) => {
   try {
     const { displayName, avatar, soundPreset, dailyGoalXp } = req.body;
     const updates = {};
     if (soundPreset) updates.sound_preset = soundPreset;
     if (dailyGoalXp) updates.daily_goal_xp = parseInt(dailyGoalXp, 10);
 
-    const updatedUser = db.updateUserProfile(req.user.id, updates);
+    const updatedUser = await db.updateUserProfile(req.user.id, updates);
     res.json({ user: updatedUser });
   } catch (err) {
     console.error('Profile update error:', err);
@@ -579,9 +585,9 @@ app.patch('/api/profile/update', auth.authMiddleware, (req, res) => {
 });
 
 // Refill Hearts with Gems
-app.post('/api/shop/refill-hearts', auth.authMiddleware, (req, res) => {
+app.post('/api/shop/refill-hearts', auth.authMiddleware, async (req, res) => {
   try {
-    const user = db.getUserById(req.user.id);
+    const user = await db.getUserById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const HEART_COST = 50;
@@ -589,7 +595,7 @@ app.post('/api/shop/refill-hearts', auth.authMiddleware, (req, res) => {
       return res.status(400).json({ error: 'Not enough gems to refill hearts' });
     }
 
-    const updated = db.updateUserProfile(req.user.id, {
+    const updated = await db.updateUserProfile(req.user.id, {
       gems: user.gems - HEART_COST,
       hearts: user.max_hearts
     });
@@ -602,9 +608,9 @@ app.post('/api/shop/refill-hearts', auth.authMiddleware, (req, res) => {
 });
 
 // Purchase Streak Freeze
-app.post('/api/shop/buy-freeze', auth.authMiddleware, (req, res) => {
+app.post('/api/shop/buy-freeze', auth.authMiddleware, async (req, res) => {
   try {
-    const user = db.getUserById(req.user.id);
+    const user = await db.getUserById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const FREEZE_COST = 100;
@@ -612,7 +618,7 @@ app.post('/api/shop/buy-freeze', auth.authMiddleware, (req, res) => {
       return res.status(400).json({ error: 'Not enough gems to purchase a freeze' });
     }
 
-    const updated = db.updateUserProfile(req.user.id, {
+    const updated = await db.updateUserProfile(req.user.id, {
       gems: user.gems - FREEZE_COST,
       streak_freezes: user.streak_freezes + 1
     });
@@ -625,9 +631,9 @@ app.post('/api/shop/buy-freeze', auth.authMiddleware, (req, res) => {
 });
 
 // Leaderboard
-app.get('/api/leaderboard', (req, res) => {
+app.get('/api/leaderboard', async (req, res) => {
   try {
-    const board = db.getLeaderboard();
+    const board = await db.getLeaderboard();
     const mockRivals = [
       { id: -1, display_name: 'Wolfgang M.', avatar: '🎼', xp: 450, streak_days: 12 },
       { id: -2, display_name: 'Clara S.', avatar: '🎹', xp: 380, streak_days: 8 },
@@ -662,6 +668,14 @@ app.get('*', (req, res) => {
   res.sendFile(indexHtml);
 });
 
-app.listen(PORT, () => {
-  console.log(`🎶 Cadence Ear Training Server running on http://localhost:${PORT}`);
+async function startServer() {
+  await db.init();
+  app.listen(PORT, () => {
+    console.log(`🎶 Cadence Ear Training Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer().catch(err => {
+  console.error('Fatal error starting server:', err);
+  process.exit(1);
 });

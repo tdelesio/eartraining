@@ -1,120 +1,400 @@
-const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 const fs = require('node:fs');
 const bcrypt = require('bcryptjs');
 
-const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+let mysql = null;
+try {
+  mysql = require('mysql2/promise');
+} catch (e) {
+  // mysql2 optional if running in pure sqlite mode
 }
 
-const dbPath = process.env.DATABASE_PATH || path.join(dataDir, 'eartraining.sqlite');
-const db = new DatabaseSync(dbPath);
+// Database configuration
+const dbType = (process.env.DB_TYPE || (process.env.DB_HOST ? 'mysql' : 'sqlite')).toLowerCase();
+const isMySQL = dbType === 'mysql';
 
-// Enable WAL mode & foreign keys for speed and reliability
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+let mysqlPool = null;
+let sqliteDb = null;
+let isInitialized = false;
 
-// Initialize tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    email TEXT,
-    password_hash TEXT,
-    display_name TEXT NOT NULL,
-    avatar TEXT NOT NULL DEFAULT '🎧',
-    is_guest INTEGER NOT NULL DEFAULT 0,
-    role TEXT NOT NULL DEFAULT 'user',
-    must_change_password INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
+// -------------------------------------------------------------
+// Database Execution Abstraction (query, queryOne, execute)
+// -------------------------------------------------------------
 
-  CREATE TABLE IF NOT EXISTS user_profiles (
-    user_id INTEGER PRIMARY KEY,
-    xp INTEGER NOT NULL DEFAULT 0,
-    gems INTEGER NOT NULL DEFAULT 150,
-    hearts INTEGER NOT NULL DEFAULT 5,
-    max_hearts INTEGER NOT NULL DEFAULT 5,
-    streak_days INTEGER NOT NULL DEFAULT 0,
-    longest_streak INTEGER NOT NULL DEFAULT 0,
-    last_active_date TEXT,
-    daily_goal_xp INTEGER NOT NULL DEFAULT 30,
-    streak_freezes INTEGER NOT NULL DEFAULT 1,
-    sound_preset TEXT NOT NULL DEFAULT 'grand_piano',
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS curriculum_units (
-    id INTEGER PRIMARY KEY,
-    title TEXT NOT NULL,
-    subtitle TEXT NOT NULL,
-    icon TEXT NOT NULL DEFAULT '🎵',
-    color TEXT NOT NULL DEFAULT '#58cc02',
-    order_index INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS curriculum_lessons (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    unit_id INTEGER NOT NULL,
-    level_number INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    type TEXT NOT NULL,
-    config_json TEXT NOT NULL DEFAULT '{}',
-    xp_reward INTEGER NOT NULL DEFAULT 20,
-    order_index INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY(unit_id) REFERENCES curriculum_units(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS lesson_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    unit_id INTEGER NOT NULL,
-    level_id INTEGER NOT NULL,
-    stars INTEGER NOT NULL DEFAULT 0,
-    score INTEGER NOT NULL DEFAULT 0,
-    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_id, unit_id, level_id),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS daily_activity (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    xp_earned INTEGER NOT NULL DEFAULT 0,
-    lessons_completed INTEGER NOT NULL DEFAULT 0,
-    quota_met INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(user_id, date),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS mistakes_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    question_type TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    user_answer TEXT NOT NULL,
-    correct_answer TEXT NOT NULL,
-    count INTEGER NOT NULL DEFAULT 1,
-    last_mistake_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-`);
-
-// Migration columns if upgrading existing sqlite
-try {
-  db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';`);
-} catch (e) {
-  // column already exists
+async function query(sql, params = []) {
+  if (isMySQL) {
+    const [rows] = await mysqlPool.query(sql, params);
+    return rows;
+  } else {
+    return sqliteDb.prepare(sql).all(...params);
+  }
 }
-try {
-  db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;`);
-} catch (e) {
-  // column already exists
+
+async function queryOne(sql, params = []) {
+  if (isMySQL) {
+    const [rows] = await mysqlPool.query(sql, params);
+    return rows[0] || null;
+  } else {
+    const row = sqliteDb.prepare(sql).get(...params);
+    return row || null;
+  }
+}
+
+async function execute(sql, params = []) {
+  if (isMySQL) {
+    const [result] = await mysqlPool.query(sql, params);
+    return {
+      insertId: result.insertId,
+      affectedRows: result.affectedRows
+    };
+  } else {
+    const result = sqliteDb.prepare(sql).run(...params);
+    return {
+      insertId: Number(result.lastInsertRowid),
+      affectedRows: result.changes
+    };
+  }
+}
+
+// -------------------------------------------------------------
+// Schema Initialization & Auto-Seeding
+// -------------------------------------------------------------
+
+async function initMySQL() {
+  if (!mysql) {
+    throw new Error('mysql2 package is not installed');
+  }
+
+  const host = process.env.DB_HOST || 'localhost';
+  const port = parseInt(process.env.DB_PORT || '3306', 10);
+  const user = process.env.DB_USER || 'dbuser';
+  const password = process.env.DB_PASSWORD || 'dbpassword';
+  const database = process.env.DB_NAME || 'eartraining';
+
+  // Retry connection loop for container environments
+  const maxAttempts = 15;
+  const delayMs = 2000;
+  let pool = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      console.log(`Connecting to MySQL database at ${host}:${port}/${database} (attempt ${attempt}/${maxAttempts})...`);
+      pool = mysql.createPool({
+        host,
+        port,
+        user,
+        password,
+        database,
+        waitForConnections: true,
+        connectionLimit: 10,
+        queueLimit: 0,
+        charset: 'utf8mb4'
+      });
+      // Test connection
+      const conn = await pool.getConnection();
+      conn.release();
+      console.log(`✅ Successfully connected to MySQL database: ${database}`);
+      break;
+    } catch (err) {
+      console.warn(`MySQL connection attempt ${attempt} failed: ${err.message}`);
+      if (attempt === maxAttempts) {
+        throw new Error(`Failed to connect to MySQL after ${maxAttempts} attempts: ${err.message}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  mysqlPool = pool;
+
+  // Initialize MySQL Tables
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(191) NOT NULL UNIQUE,
+      email VARCHAR(191),
+      password_hash VARCHAR(255),
+      display_name VARCHAR(255) NOT NULL,
+      avatar VARCHAR(50) NOT NULL DEFAULT '🎧',
+      is_guest TINYINT(1) NOT NULL DEFAULT 0,
+      role VARCHAR(50) NOT NULL DEFAULT 'user',
+      must_change_password TINYINT(1) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id INT PRIMARY KEY,
+      xp INT NOT NULL DEFAULT 0,
+      gems INT NOT NULL DEFAULT 150,
+      hearts INT NOT NULL DEFAULT 5,
+      max_hearts INT NOT NULL DEFAULT 5,
+      streak_days INT NOT NULL DEFAULT 0,
+      longest_streak INT NOT NULL DEFAULT 0,
+      last_active_date VARCHAR(50),
+      daily_goal_xp INT NOT NULL DEFAULT 30,
+      streak_freezes INT NOT NULL DEFAULT 1,
+      sound_preset VARCHAR(50) NOT NULL DEFAULT 'grand_piano',
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS curriculum_units (
+      id INT PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      subtitle VARCHAR(255) NOT NULL,
+      icon VARCHAR(50) NOT NULL DEFAULT '🎵',
+      color VARCHAR(50) NOT NULL DEFAULT '#58cc02',
+      order_index INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS curriculum_lessons (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      unit_id INT NOT NULL,
+      level_number INT NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      description TEXT NOT NULL,
+      type VARCHAR(50) NOT NULL,
+      config_json LONGTEXT NOT NULL,
+      xp_reward INT NOT NULL DEFAULT 20,
+      order_index INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (unit_id) REFERENCES curriculum_units(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS lesson_progress (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      unit_id INT NOT NULL,
+      level_id INT NOT NULL,
+      stars INT NOT NULL DEFAULT 0,
+      score INT NOT NULL DEFAULT 0,
+      completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_unit_level (user_id, unit_id, level_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS daily_activity (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      date VARCHAR(50) NOT NULL,
+      xp_earned INT NOT NULL DEFAULT 0,
+      lessons_completed INT NOT NULL DEFAULT 0,
+      quota_met TINYINT(1) NOT NULL DEFAULT 0,
+      UNIQUE KEY unique_user_date (user_id, date),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS mistakes_log (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      question_type VARCHAR(50) NOT NULL,
+      prompt TEXT NOT NULL,
+      user_answer TEXT NOT NULL,
+      correct_answer TEXT NOT NULL,
+      count INT NOT NULL DEFAULT 1,
+      last_mistake_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  console.log('✅ MySQL schema verified and ready.');
+}
+
+async function initSQLite() {
+  const { DatabaseSync } = require('node:sqlite');
+  const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  const dbPath = process.env.DATABASE_PATH || path.join(dataDir, 'eartraining.sqlite');
+  console.log(`Using SQLite database at: ${dbPath}`);
+  sqliteDb = new DatabaseSync(dbPath);
+
+  sqliteDb.exec('PRAGMA journal_mode = WAL;');
+  sqliteDb.exec('PRAGMA foreign_keys = ON;');
+
+  sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT,
+      password_hash TEXT,
+      display_name TEXT NOT NULL,
+      avatar TEXT NOT NULL DEFAULT '🎧',
+      is_guest INTEGER NOT NULL DEFAULT 0,
+      role TEXT NOT NULL DEFAULT 'user',
+      must_change_password INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id INTEGER PRIMARY KEY,
+      xp INTEGER NOT NULL DEFAULT 0,
+      gems INTEGER NOT NULL DEFAULT 150,
+      hearts INTEGER NOT NULL DEFAULT 5,
+      max_hearts INTEGER NOT NULL DEFAULT 5,
+      streak_days INTEGER NOT NULL DEFAULT 0,
+      longest_streak INTEGER NOT NULL DEFAULT 0,
+      last_active_date TEXT,
+      daily_goal_xp INTEGER NOT NULL DEFAULT 30,
+      streak_freezes INTEGER NOT NULL DEFAULT 1,
+      sound_preset TEXT NOT NULL DEFAULT 'grand_piano',
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS curriculum_units (
+      id INTEGER PRIMARY KEY,
+      title TEXT NOT NULL,
+      subtitle TEXT NOT NULL,
+      icon TEXT NOT NULL DEFAULT '🎵',
+      color TEXT NOT NULL DEFAULT '#58cc02',
+      order_index INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS curriculum_lessons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unit_id INTEGER NOT NULL,
+      level_number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      xp_reward INTEGER NOT NULL DEFAULT 20,
+      order_index INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY(unit_id) REFERENCES curriculum_units(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS lesson_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      unit_id INTEGER NOT NULL,
+      level_id INTEGER NOT NULL,
+      stars INTEGER NOT NULL DEFAULT 0,
+      score INTEGER NOT NULL DEFAULT 0,
+      completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, unit_id, level_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      xp_earned INTEGER NOT NULL DEFAULT 0,
+      lessons_completed INTEGER NOT NULL DEFAULT 0,
+      quota_met INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(user_id, date),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS mistakes_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      question_type TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      user_answer TEXT NOT NULL,
+      correct_answer TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 1,
+      last_mistake_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  try {
+    sqliteDb.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';`);
+  } catch (e) {
+    // column exists
+  }
+  try {
+    sqliteDb.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;`);
+  } catch (e) {
+    // column exists
+  }
+}
+
+async function seedInitialAdmin() {
+  const existing = await queryOne('SELECT * FROM users WHERE email = ? OR username = ?', ['tdelesio@gmail.com', 'tdelesio']);
+  if (!existing) {
+    const initialPassword = process.env.INITIAL_ADMIN_PASSWORD || 'password';
+    const mustChange = process.env.INITIAL_ADMIN_MUST_CHANGE_PASSWORD === 'false' ? 0 : 1;
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync(initialPassword, salt);
+
+    const res = await execute(`
+      INSERT INTO users (username, email, password_hash, display_name, avatar, is_guest, role, must_change_password)
+      VALUES (?, ?, ?, ?, ?, 0, 'admin', ?)
+    `, ['tdelesio', 'tdelesio@gmail.com', hash, 'Tim Delesio', '🎵', mustChange]);
+
+    const userId = res.insertId;
+    await execute(`
+      INSERT INTO user_profiles (user_id, xp, gems, hearts, max_hearts, streak_days, longest_streak, daily_goal_xp, streak_freezes, sound_preset)
+      VALUES (?, 150, 500, 5, 5, 1, 1, 30, 2, 'grand_piano')
+    `, [userId]);
+    console.log(`Seeded initial admin user: tdelesio@gmail.com (Password: ${initialPassword === 'password' ? 'password' : '***'}, must_change_password: ${mustChange})`);
+  } else if (existing.role !== 'admin') {
+    await execute("UPDATE users SET role = 'admin' WHERE id = ?", [existing.id]);
+  }
+}
+
+async function seedInitialCurriculum() {
+  const countRow = await queryOne('SELECT COUNT(*) as count FROM curriculum_units');
+  const count = Number(countRow?.count || 0);
+  if (count === 0) {
+    const curriculum = require('./curriculum');
+    for (const unit of curriculum.UNITS) {
+      await execute(`
+        INSERT INTO curriculum_units (id, title, subtitle, icon, color, order_index)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [unit.id, unit.title, unit.subtitle, unit.icon, unit.color, unit.id]);
+
+      for (const level of unit.levels) {
+        await execute(`
+          INSERT INTO curriculum_lessons (unit_id, level_number, title, description, type, config_json, xp_reward, order_index)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          unit.id,
+          level.id,
+          level.title,
+          level.description,
+          level.type,
+          JSON.stringify(level.config || {}),
+          level.xpReward || 20,
+          level.id
+        ]);
+      }
+    }
+    console.log(`Seeded ${curriculum.UNITS.length} initial curriculum units into database.`);
+  }
+}
+
+async function init() {
+  if (isInitialized) return;
+
+  if (isMySQL) {
+    await initMySQL();
+  } else {
+    await initSQLite();
+  }
+
+  await seedInitialAdmin();
+  await seedInitialCurriculum();
+
+  isInitialized = true;
+  console.log(`Cadence database initialized successfully [Engine: ${isMySQL ? 'MySQL' : 'SQLite'}]`);
 }
 
 // Date helper (YYYY-MM-DD)
@@ -129,85 +409,77 @@ function getYesterdayString() {
   return d.toISOString().split('T')[0];
 }
 
-// User operations
-function createUser(username, email, passwordHash, displayName, isGuest = 0, avatar = '🎧', role = 'user', mustChangePassword = 0) {
-  const insertUser = db.prepare(`
+// -------------------------------------------------------------
+// User Operations
+// -------------------------------------------------------------
+
+async function createUser(username, email, passwordHash, displayName, isGuest = 0, avatar = '🎧', role = 'user', mustChangePassword = 0) {
+  const result = await execute(`
     INSERT INTO users (username, email, password_hash, display_name, is_guest, avatar, role, must_change_password)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const result = insertUser.run(username, email, passwordHash, displayName, isGuest, avatar, role, mustChangePassword);
-  const userId = Number(result.lastInsertRowid);
+  `, [username, email, passwordHash, displayName, isGuest, avatar, role, mustChangePassword]);
 
-  // Initialize user profile
-  db.prepare(`
+  const userId = result.insertId;
+
+  await execute(`
     INSERT INTO user_profiles (user_id, xp, gems, hearts, max_hearts, streak_days, longest_streak, daily_goal_xp, streak_freezes, sound_preset)
     VALUES (?, 0, 150, 5, 5, 0, 0, 30, 1, 'grand_piano')
-  `).run(userId);
+  `, [userId]);
 
   return getUserById(userId);
 }
 
-function getUserById(id) {
-  const row = db.prepare(`
+async function getUserById(id) {
+  const row = await queryOne(`
     SELECT u.id, u.username, u.email, u.display_name, u.avatar, u.is_guest, u.role, u.must_change_password, u.created_at,
            p.xp, p.gems, p.hearts, p.max_hearts, p.streak_days, p.longest_streak,
            p.last_active_date, p.daily_goal_xp, p.streak_freezes, p.sound_preset
     FROM users u
     JOIN user_profiles p ON u.id = p.user_id
     WHERE u.id = ?
-  `).get(id);
+  `, [id]);
 
   return row ? { ...row } : null;
 }
 
-function getUserByUsername(username) {
-  const row = db.prepare(`
-    SELECT * FROM users WHERE username = ?
-  `).get(username);
+async function getUserByUsername(username) {
+  const row = await queryOne('SELECT * FROM users WHERE username = ?', [username]);
   return row ? { ...row } : null;
 }
 
-function getUserByEmail(email) {
-  const row = db.prepare(`
-    SELECT * FROM users WHERE LOWER(email) = LOWER(?)
-  `).get(email);
+async function getUserByEmail(email) {
+  const row = await queryOne('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [email]);
   return row ? { ...row } : null;
 }
 
-function getUserByUsernameOrEmail(identifier) {
-  const row = db.prepare(`
-    SELECT * FROM users WHERE username = ? OR LOWER(email) = LOWER(?)
-  `).get(identifier, identifier);
+async function getUserByUsernameOrEmail(identifier) {
+  const row = await queryOne('SELECT * FROM users WHERE username = ? OR LOWER(email) = LOWER(?)', [identifier, identifier]);
   return row ? { ...row } : null;
 }
 
-function getAllUsers() {
-  const rows = db.prepare(`
+async function getAllUsers() {
+  const rows = await query(`
     SELECT u.id, u.username, u.email, u.display_name, u.avatar, u.is_guest, u.role, u.must_change_password, u.created_at,
            p.xp, p.gems, p.hearts, p.streak_days, p.longest_streak, p.last_active_date
     FROM users u
     LEFT JOIN user_profiles p ON u.id = p.user_id
     WHERE u.is_guest = 0
     ORDER BY u.id ASC
-  `).all();
+  `);
   return rows.map(r => ({ ...r }));
 }
 
-function updateUserRole(userId, newRole) {
-  db.prepare(`
-    UPDATE users SET role = ? WHERE id = ?
-  `).run(newRole, userId);
+async function updateUserRole(userId, newRole) {
+  await execute('UPDATE users SET role = ? WHERE id = ?', [newRole, userId]);
   return getUserById(userId);
 }
 
-function updateUserPassword(userId, passwordHash, mustChangePassword = 0) {
-  db.prepare(`
-    UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?
-  `).run(passwordHash, mustChangePassword, userId);
+async function updateUserPassword(userId, passwordHash, mustChangePassword = 0) {
+  await execute('UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?', [passwordHash, mustChangePassword, userId]);
   return getUserById(userId);
 }
 
-function updateUserProfile(userId, updates = {}) {
+async function updateUserProfile(userId, updates = {}) {
   const allowed = [
     'xp', 'gems', 'hearts', 'max_hearts', 'streak_days',
     'longest_streak', 'last_active_date', 'daily_goal_xp',
@@ -227,21 +499,19 @@ function updateUserProfile(userId, updates = {}) {
   if (setClauses.length === 0) return getUserById(userId);
 
   values.push(userId);
-  const query = `UPDATE user_profiles SET ${setClauses.join(', ')} WHERE user_id = ?`;
-  db.prepare(query).run(...values);
+  await execute(`UPDATE user_profiles SET ${setClauses.join(', ')} WHERE user_id = ?`, values);
 
   return getUserById(userId);
 }
 
-function recordDailyActivityAndStreak(userId, xpEarned) {
+async function recordDailyActivityAndStreak(userId, xpEarned) {
   const today = getTodayString();
   const yesterday = getYesterdayString();
 
-  const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId);
+  const profile = await queryOne('SELECT * FROM user_profiles WHERE user_id = ?', [userId]);
   if (!profile) return null;
 
-  // Insert or update daily activity
-  const existingDaily = db.prepare('SELECT * FROM daily_activity WHERE user_id = ? AND date = ?').get(userId, today);
+  const existingDaily = await queryOne('SELECT * FROM daily_activity WHERE user_id = ? AND date = ?', [userId, today]);
   let newDailyXp = xpEarned;
   let newLessons = 1;
   let quotaMet = 0;
@@ -250,17 +520,17 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
     newDailyXp = existingDaily.xp_earned + xpEarned;
     newLessons = existingDaily.lessons_completed + 1;
     quotaMet = newDailyXp >= profile.daily_goal_xp ? 1 : 0;
-    db.prepare(`
+    await execute(`
       UPDATE daily_activity
       SET xp_earned = ?, lessons_completed = ?, quota_met = ?
       WHERE id = ?
-    `).run(newDailyXp, newLessons, quotaMet, existingDaily.id);
+    `, [newDailyXp, newLessons, quotaMet, existingDaily.id]);
   } else {
     quotaMet = newDailyXp >= profile.daily_goal_xp ? 1 : 0;
-    db.prepare(`
+    await execute(`
       INSERT INTO daily_activity (user_id, date, xp_earned, lessons_completed, quota_met)
       VALUES (?, ?, ?, ?, ?)
-    `).run(userId, today, newDailyXp, newLessons, quotaMet);
+    `, [userId, today, newDailyXp, newLessons, quotaMet]);
   }
 
   // Calculate streak logic
@@ -271,18 +541,15 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
   if (lastActive === today) {
     // Already active today; streak unchanged
   } else if (lastActive === yesterday) {
-    // Active yesterday; streak increments by 1
     currentStreak += 1;
   } else if (!lastActive) {
-    // First day ever!
     currentStreak = 1;
   } else {
-    // Missed a day or more: check if we have a streak freeze
     if (freezes > 0) {
-      freezes -= 1; // Consume freeze to preserve streak!
+      freezes -= 1;
       currentStreak += 1;
     } else {
-      currentStreak = 1; // Streak reset
+      currentStreak = 1;
     }
   }
 
@@ -290,11 +557,11 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
   const totalXp = profile.xp + xpEarned;
   const totalGems = profile.gems + 15;
 
-  db.prepare(`
+  await execute(`
     UPDATE user_profiles
     SET xp = ?, gems = ?, streak_days = ?, longest_streak = ?, last_active_date = ?, streak_freezes = ?
     WHERE user_id = ?
-  `).run(totalXp, totalGems, currentStreak, longestStreak, today, freezes, userId);
+  `, [totalXp, totalGems, currentStreak, longestStreak, today, freezes, userId]);
 
   return {
     streakDays: currentStreak,
@@ -307,335 +574,268 @@ function recordDailyActivityAndStreak(userId, xpEarned) {
   };
 }
 
-function recordLessonProgress(userId, unitId, levelId, score, stars, xpEarned) {
-  const existing = db.prepare(`
+async function recordLessonProgress(userId, unitId, levelId, score, stars, xpEarned) {
+  const existing = await queryOne(`
     SELECT * FROM lesson_progress WHERE user_id = ? AND unit_id = ? AND level_id = ?
-  `).get(userId, unitId, levelId);
+  `, [userId, unitId, levelId]);
 
   if (existing) {
     const bestStars = Math.max(existing.stars, stars);
     const bestScore = Math.max(existing.score, score);
-    db.prepare(`
+    await execute(`
       UPDATE lesson_progress
-      SET stars = ?, score = ?, completed_at = datetime('now')
+      SET stars = ?, score = ?, completed_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(bestStars, bestScore, existing.id);
+    `, [bestStars, bestScore, existing.id]);
   } else {
-    db.prepare(`
+    await execute(`
       INSERT INTO lesson_progress (user_id, unit_id, level_id, stars, score)
       VALUES (?, ?, ?, ?, ?)
-    `).run(userId, unitId, levelId, stars, score);
+    `, [userId, unitId, levelId, stars, score]);
   }
 
-  const streakResult = recordDailyActivityAndStreak(userId, xpEarned);
+  const streakResult = await recordDailyActivityAndStreak(userId, xpEarned);
   return {
-    progress: getUserProgress(userId),
+    progress: await getUserProgress(userId),
     streakResult,
-    user: getUserById(userId)
+    user: await getUserById(userId)
   };
 }
 
-function getUserProgress(userId) {
-  const rows = db.prepare(`
+async function getUserProgress(userId) {
+  const rows = await query(`
     SELECT unit_id, level_id, stars, score, completed_at
     FROM lesson_progress
     WHERE user_id = ?
     ORDER BY unit_id ASC, level_id ASC
-  `).all(userId);
+  `, [userId]);
   return rows.map(r => ({ ...r }));
 }
 
-function getDailyHistory(userId, limit = 14) {
-  const rows = db.prepare(`
+async function getDailyHistory(userId, limit = 14) {
+  const rows = await query(`
     SELECT date, xp_earned, lessons_completed, quota_met
     FROM daily_activity
     WHERE user_id = ?
     ORDER BY date DESC
     LIMIT ?
-  `).all(userId, limit);
+  `, [userId, limit]);
   return rows.map(r => ({ ...r }));
 }
 
-function recordMistake(userId, questionType, prompt, userAnswer, correctAnswer) {
-  const existing = db.prepare(`
+async function recordMistake(userId, questionType, prompt, userAnswer, correctAnswer) {
+  const existing = await queryOne(`
     SELECT * FROM mistakes_log
     WHERE user_id = ? AND question_type = ? AND prompt = ?
-  `).get(userId, questionType, prompt);
+  `, [userId, questionType, prompt]);
 
   if (existing) {
-    db.prepare(`
+    await execute(`
       UPDATE mistakes_log
-      SET count = count + 1, user_answer = ?, last_mistake_at = datetime('now')
+      SET count = count + 1, user_answer = ?, last_mistake_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(userAnswer, existing.id);
+    `, [userAnswer, existing.id]);
   } else {
-    db.prepare(`
+    await execute(`
       INSERT INTO mistakes_log (user_id, question_type, prompt, user_answer, correct_answer)
       VALUES (?, ?, ?, ?, ?)
-    `).run(userId, questionType, prompt, userAnswer, correctAnswer);
+    `, [userId, questionType, prompt, userAnswer, correctAnswer]);
   }
 }
 
-function getMistakes(userId, limit = 10) {
-  const rows = db.prepare(`
+async function getMistakes(userId, limit = 10) {
+  const rows = await query(`
     SELECT question_type, prompt, user_answer, correct_answer, count, last_mistake_at
     FROM mistakes_log
     WHERE user_id = ?
     ORDER BY count DESC, last_mistake_at DESC
     LIMIT ?
-  `).all(userId, limit);
+  `, [userId, limit]);
   return rows.map(r => ({ ...r }));
 }
 
-function getLeaderboard() {
-  const rows = db.prepare(`
+async function getLeaderboard() {
+  const rows = await query(`
     SELECT u.id, u.display_name, u.avatar, p.xp, p.streak_days
     FROM users u
     JOIN user_profiles p ON u.id = p.user_id
     WHERE u.is_guest = 0
     ORDER BY p.xp DESC
     LIMIT 20
-  `).all();
+  `);
   return rows.map(r => ({ ...r }));
 }
 
-function claimGuestAccount(guestUserId, newUsername, passwordHash, displayName) {
-  db.prepare(`
+async function claimGuestAccount(guestUserId, newUsername, passwordHash, displayName) {
+  await execute(`
     UPDATE users
     SET username = ?, password_hash = ?, display_name = ?, is_guest = 0
     WHERE id = ? AND is_guest = 1
-  `).run(newUsername, passwordHash, displayName, guestUserId);
+  `, [newUsername, passwordHash, displayName, guestUserId]);
 
   return getUserById(guestUserId);
 }
 
-// ==========================================
-// Curriculum & Lesson CMS Database Functions
-// ==========================================
+// -------------------------------------------------------------
+// Curriculum & Lesson CMS Operations
+// -------------------------------------------------------------
 
-function getAllUnits() {
-  const rows = db.prepare(`
+async function getAllUnits() {
+  const rows = await query(`
     SELECT * FROM curriculum_units
     ORDER BY order_index ASC, id ASC
-  `).all();
+  `);
   return rows.map(r => ({ ...r }));
 }
 
-function getLessonsByUnit(unitId) {
-  const rows = db.prepare(`
+async function getLessonsByUnit(unitId) {
+  const rows = await query(`
     SELECT * FROM curriculum_lessons
     WHERE unit_id = ?
     ORDER BY order_index ASC, level_number ASC, id ASC
-  `).all(unitId);
+  `, [unitId]);
   return rows.map(r => ({
     ...r,
-    config: r.config_json ? JSON.parse(r.config_json) : {}
+    config: typeof r.config_json === 'string' ? JSON.parse(r.config_json || '{}') : (r.config_json || {})
   }));
 }
 
-function getLessonById(lessonId) {
-  const row = db.prepare(`
-    SELECT * FROM curriculum_lessons WHERE id = ?
-  `).get(lessonId);
+async function getLessonById(lessonId) {
+  const row = await queryOne('SELECT * FROM curriculum_lessons WHERE id = ?', [lessonId]);
   if (!row) return null;
   return {
     ...row,
-    config: row.config_json ? JSON.parse(row.config_json) : {}
+    config: typeof row.config_json === 'string' ? JSON.parse(row.config_json || '{}') : (row.config_json || {})
   };
 }
 
-function getLessonByUnitAndLevel(unitId, levelNumber) {
-  const row = db.prepare(`
-    SELECT * FROM curriculum_lessons WHERE unit_id = ? AND level_number = ?
-  `).get(unitId, levelNumber);
+async function getLessonByUnitAndLevel(unitId, levelNumber) {
+  const row = await queryOne('SELECT * FROM curriculum_lessons WHERE unit_id = ? AND level_number = ?', [unitId, levelNumber]);
   if (!row) return null;
   return {
     ...row,
-    config: row.config_json ? JSON.parse(row.config_json) : {}
+    config: typeof row.config_json === 'string' ? JSON.parse(row.config_json || '{}') : (row.config_json || {})
   };
 }
 
-function getCurriculumTree() {
-  const units = getAllUnits();
-  return units.map(u => ({
-    id: u.id,
-    title: u.title,
-    subtitle: u.subtitle,
-    icon: u.icon,
-    color: u.color,
-    order_index: u.order_index,
-    levels: getLessonsByUnit(u.id).map(l => ({
-      id: l.level_number,
-      lessonDbId: l.id,
-      title: l.title,
-      description: l.description,
-      type: l.type,
-      config: l.config,
-      xpReward: l.xp_reward,
-      order_index: l.order_index
-    }))
-  }));
+async function getCurriculumTree() {
+  const units = await getAllUnits();
+  const tree = [];
+  for (const u of units) {
+    const lessons = await getLessonsByUnit(u.id);
+    tree.push({
+      id: u.id,
+      title: u.title,
+      subtitle: u.subtitle,
+      icon: u.icon,
+      color: u.color,
+      order_index: u.order_index,
+      levels: lessons.map(l => ({
+        id: l.level_number,
+        lessonDbId: l.id,
+        title: l.title,
+        description: l.description,
+        type: l.type,
+        config: l.config,
+        xpReward: l.xp_reward,
+        order_index: l.order_index
+      }))
+    });
+  }
+  return tree;
 }
 
-function createUnit({ id, title, subtitle, icon = '🎵', color = '#58cc02' }) {
+async function createUnit({ id, title, subtitle, icon = '🎵', color = '#58cc02' }) {
   let targetId = id;
   if (targetId === undefined || targetId === null) {
-    const maxRow = db.prepare('SELECT MAX(id) as maxId FROM curriculum_units').get();
-    targetId = (maxRow?.maxId !== null && maxRow?.maxId !== undefined) ? maxRow.maxId + 1 : 0;
+    const maxRow = await queryOne('SELECT MAX(id) as maxId FROM curriculum_units');
+    targetId = (maxRow?.maxId !== null && maxRow?.maxId !== undefined) ? Number(maxRow.maxId) + 1 : 0;
   }
-  const maxOrder = db.prepare('SELECT MAX(order_index) as maxOrder FROM curriculum_units').get();
-  const nextOrder = (maxOrder?.maxOrder !== null && maxOrder?.maxOrder !== undefined) ? maxOrder.maxOrder + 1 : 0;
+  const maxOrder = await queryOne('SELECT MAX(order_index) as maxOrder FROM curriculum_units');
+  const nextOrder = (maxOrder?.maxOrder !== null && maxOrder?.maxOrder !== undefined) ? Number(maxOrder.maxOrder) + 1 : 0;
 
-  db.prepare(`
+  await execute(`
     INSERT INTO curriculum_units (id, title, subtitle, icon, color, order_index)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(targetId, title, subtitle, icon, color, nextOrder);
+  `, [targetId, title, subtitle, icon, color, nextOrder]);
 
-  return db.prepare('SELECT * FROM curriculum_units WHERE id = ?').get(targetId);
+  return queryOne('SELECT * FROM curriculum_units WHERE id = ?', [targetId]);
 }
 
-function updateUnit(unitId, { title, subtitle, icon, color }) {
-  db.prepare(`
+async function updateUnit(unitId, { title, subtitle, icon, color }) {
+  await execute(`
     UPDATE curriculum_units
     SET title = COALESCE(?, title),
         subtitle = COALESCE(?, subtitle),
         icon = COALESCE(?, icon),
         color = COALESCE(?, color)
     WHERE id = ?
-  `).run(title, subtitle, icon, color, unitId);
+  `, [title, subtitle, icon, color, unitId]);
 
-  return db.prepare('SELECT * FROM curriculum_units WHERE id = ?').get(unitId);
+  return queryOne('SELECT * FROM curriculum_units WHERE id = ?', [unitId]);
 }
 
-function deleteUnit(unitId) {
-  // Cascading deletes lessons
-  db.prepare('DELETE FROM curriculum_units WHERE id = ?').run(unitId);
+async function deleteUnit(unitId) {
+  await execute('DELETE FROM curriculum_units WHERE id = ?', [unitId]);
   return true;
 }
 
-function createLesson(unitId, { title, description, type, config = {}, xpReward = 20 }) {
-  // Determine next level_number and order_index in this unit
-  const maxLevelRow = db.prepare('SELECT MAX(level_number) as maxLvl, MAX(order_index) as maxOrder FROM curriculum_lessons WHERE unit_id = ?').get(unitId);
-  const nextLevel = (maxLevelRow?.maxLvl !== null && maxLevelRow?.maxLvl !== undefined) ? maxLevelRow.maxLvl + 1 : 0;
-  const nextOrder = (maxLevelRow?.maxOrder !== null && maxLevelRow?.maxOrder !== undefined) ? maxLevelRow.maxOrder + 1 : 0;
+async function createLesson(unitId, { title, description, type, config = {}, xpReward = 20 }) {
+  const maxLevelRow = await queryOne('SELECT MAX(level_number) as maxLvl, MAX(order_index) as maxOrder FROM curriculum_lessons WHERE unit_id = ?', [unitId]);
+  const nextLevel = (maxLevelRow?.maxLvl !== null && maxLevelRow?.maxLvl !== undefined) ? Number(maxLevelRow.maxLvl) + 1 : 0;
+  const nextOrder = (maxLevelRow?.maxOrder !== null && maxLevelRow?.maxOrder !== undefined) ? Number(maxLevelRow.maxOrder) + 1 : 0;
 
-  const res = db.prepare(`
+  const res = await execute(`
     INSERT INTO curriculum_lessons (unit_id, level_number, title, description, type, config_json, xp_reward, order_index)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(unitId, nextLevel, title, description, type, JSON.stringify(config), xpReward, nextOrder);
+  `, [unitId, nextLevel, title, description, type, JSON.stringify(config), xpReward, nextOrder]);
 
-  return getLessonById(Number(res.lastInsertRowid));
+  return getLessonById(res.insertId);
 }
 
-function updateLesson(lessonId, { title, description, type, config, xpReward }) {
-  const existing = getLessonById(lessonId);
+async function updateLesson(lessonId, { title, description, type, config, xpReward }) {
+  const existing = await getLessonById(lessonId);
   if (!existing) return null;
 
   const newTitle = title !== undefined ? title : existing.title;
   const newDesc = description !== undefined ? description : existing.description;
   const newType = type !== undefined ? type : existing.type;
-  const newConfigJson = config !== undefined ? JSON.stringify(config) : existing.config_json;
+  const newConfigJson = config !== undefined ? JSON.stringify(config) : (typeof existing.config_json === 'string' ? existing.config_json : JSON.stringify(existing.config_json || {}));
   const newXp = xpReward !== undefined ? xpReward : existing.xp_reward;
 
-  db.prepare(`
+  await execute(`
     UPDATE curriculum_lessons
     SET title = ?, description = ?, type = ?, config_json = ?, xp_reward = ?
     WHERE id = ?
-  `).run(newTitle, newDesc, newType, newConfigJson, newXp, lessonId);
+  `, [newTitle, newDesc, newType, newConfigJson, newXp, lessonId]);
 
   return getLessonById(lessonId);
 }
 
-function deleteLesson(lessonId) {
-  db.prepare('DELETE FROM curriculum_lessons WHERE id = ?').run(lessonId);
+async function deleteLesson(lessonId) {
+  await execute('DELETE FROM curriculum_lessons WHERE id = ?', [lessonId]);
   return true;
 }
 
-function reorderLessons(lessonIdsInOrder) {
-  const stmt = db.prepare('UPDATE curriculum_lessons SET order_index = ?, level_number = ? WHERE id = ?');
-  lessonIdsInOrder.forEach((id, idx) => {
-    stmt.run(idx, idx, id);
-  });
-  return true;
-}
-
-function reorderUnits(unitIdsInOrder) {
-  const stmt = db.prepare('UPDATE curriculum_units SET order_index = ? WHERE id = ?');
-  unitIdsInOrder.forEach((id, idx) => {
-    stmt.run(idx, id);
-  });
-  return true;
-}
-
-// ==========================================
-// Auto-seeding of Initial Admin & Curriculum
-// ==========================================
-
-function seedInitialAdmin() {
-  const existing = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get('tdelesio@gmail.com', 'tdelesio');
-  if (!existing) {
-    const initialPassword = process.env.INITIAL_ADMIN_PASSWORD || 'password';
-    const mustChange = process.env.INITIAL_ADMIN_MUST_CHANGE_PASSWORD === 'false' ? 0 : 1;
-    const salt = bcrypt.genSaltSync(10);
-    const hash = bcrypt.hashSync(initialPassword, salt);
-    const res = db.prepare(`
-      INSERT INTO users (username, email, password_hash, display_name, avatar, is_guest, role, must_change_password)
-      VALUES (?, ?, ?, ?, ?, 0, 'admin', ?)
-    `).run('tdelesio', 'tdelesio@gmail.com', hash, 'Tim Delesio', '🎵', mustChange);
-    const userId = Number(res.lastInsertRowid);
-    db.prepare(`
-      INSERT INTO user_profiles (user_id, xp, gems, hearts, max_hearts, streak_days, longest_streak, daily_goal_xp, streak_freezes, sound_preset)
-      VALUES (?, 150, 500, 5, 5, 1, 1, 30, 2, 'grand_piano')
-    `).run(userId);
-    console.log(`Seeded initial admin user: tdelesio@gmail.com (Password: ${initialPassword === 'password' ? 'password' : '***'}, must_change_password: ${mustChange})`);
-  } else if (existing.role !== 'admin') {
-    // Ensure tdelesio has admin role if already registered
-    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(existing.id);
+async function reorderLessons(lessonIdsInOrder) {
+  for (let idx = 0; idx < lessonIdsInOrder.length; idx++) {
+    await execute('UPDATE curriculum_lessons SET order_index = ?, level_number = ? WHERE id = ?', [idx, idx, lessonIdsInOrder[idx]]);
   }
+  return true;
 }
 
-function seedInitialCurriculum() {
-  const countRow = db.prepare('SELECT COUNT(*) as count FROM curriculum_units').get();
-  if (countRow.count === 0) {
-    const curriculum = require('./curriculum');
-    const insertUnit = db.prepare(`
-      INSERT INTO curriculum_units (id, title, subtitle, icon, color, order_index)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    const insertLesson = db.prepare(`
-      INSERT INTO curriculum_lessons (unit_id, level_number, title, description, type, config_json, xp_reward, order_index)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    curriculum.UNITS.forEach((unit, uIdx) => {
-      insertUnit.run(unit.id, unit.title, unit.subtitle, unit.icon, unit.color, uIdx);
-      unit.levels.forEach((lvl, lIdx) => {
-        insertLesson.run(
-          unit.id,
-          lvl.id,
-          lvl.title,
-          lvl.description,
-          lvl.type,
-          JSON.stringify({}),
-          lvl.xpReward || 20,
-          lIdx
-        );
-      });
-    });
-    console.log(`Seeded ${curriculum.UNITS.length} initial curriculum units into database.`);
+async function reorderUnits(unitIdsInOrder) {
+  for (let idx = 0; idx < unitIdsInOrder.length; idx++) {
+    await execute('UPDATE curriculum_units SET order_index = ? WHERE id = ?', [idx, unitIdsInOrder[idx]]);
   }
-}
-
-// Run initial seeding
-try {
-  seedInitialAdmin();
-  seedInitialCurriculum();
-} catch (e) {
-  console.error('Initial seeding warning:', e);
+  return true;
 }
 
 module.exports = {
-  db,
+  init,
+  query,
+  queryOne,
+  execute,
   createUser,
   getUserById,
   getUserByUsername,
