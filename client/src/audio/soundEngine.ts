@@ -25,16 +25,67 @@ class SoundEngine {
   private masterGain: GainNode | null = null;
   private activeDroneGain: GainNode | null = null;
 
-  private initContext() {
+  public initContext(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return null;
       this.ctx = new AudioCtx();
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.setValueAtTime(0.85, this.ctx.currentTime);
       this.masterGain.connect(this.ctx.destination);
     }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+
+    if (this.ctx && (this.ctx.state === 'suspended' || (this.ctx.state as string) === 'interrupted')) {
+      this.ctx.resume().catch(() => {});
+    }
+
+    return this.ctx;
+  }
+
+  // Explicit unlock called on user interactions (touchstart/touchend/click)
+  public async unlock(): Promise<boolean> {
+    const ctx = this.initContext();
+    if (!ctx) return false;
+
+    try {
+      if (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted') {
+        await ctx.resume();
+      }
+
+      // 1. Play 1-frame silent buffer through Web Audio API
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+
+      // 2. Play a brief silent HTML5 audio element to switch iOS from 'ambient' to 'playback'
+      // This allows sound to play even if the iPhone ring/silent switch is set to silent!
+      const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+      silentAudio.setAttribute('playsinline', 'true');
+      silentAudio.volume = 0.01;
+      const playPromise = silentAudio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {});
+      }
+
+      return true;
+    } catch (e) {
+      console.warn('Web Audio unlock failed:', e);
+      return false;
+    }
+  }
+
+  public async ensureRunning(): Promise<void> {
+    const ctx = this.initContext();
+    if (ctx && (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted')) {
+      try {
+        await ctx.resume();
+      } catch (e) {
+        console.warn('Context resume failed:', e);
+      }
     }
   }
 

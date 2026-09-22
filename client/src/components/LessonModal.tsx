@@ -51,8 +51,9 @@ export const LessonModal: React.FC<LessonModalProps> = ({
     playPromptAudio(false);
   }, [currentIndex]);
 
-  const playPromptAudio = (slow: boolean = false) => {
+  const playPromptAudio = async (slow: boolean = false) => {
     if (!currentQuestion?.audioPrompt) return;
+    await soundEngine.ensureRunning();
     setIsPlayingAudio(true);
     const { type, notes, durations, delays } = currentQuestion.audioPrompt;
 
@@ -223,7 +224,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
           <div className="my-6 flex flex-col items-center">
             {/* Big Tactile Replay Button */}
             <button
-              onClick={() => playPromptAudio(false)}
+              onClick={async () => {
+                await soundEngine.unlock();
+                playPromptAudio(false);
+              }}
               className={`w-28 h-28 rounded-full flex flex-col items-center justify-center duo-btn-push transition-all ${
                 isPlayingAudio
                   ? 'bg-emerald-400 ring-8 ring-emerald-200 shadow-[0_6px_0_0_#059669]'
@@ -239,7 +243,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
             {/* Helper Buttons: Play Slow & Tonic Drone Anchor */}
             <div className="flex items-center gap-3 mt-4">
               <button
-                onClick={() => playPromptAudio(true)}
+                onClick={async () => {
+                  await soundEngine.unlock();
+                  playPromptAudio(true);
+                }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 text-xs font-bold transition-colors"
                 title="Play notes slowly and arpeggiated"
               >
@@ -249,7 +256,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
 
               {currentQuestion.tonicDrone && (
                 <button
-                  onClick={playTonicAnchor}
+                  onClick={async () => {
+                    await soundEngine.unlock();
+                    playTonicAnchor();
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-xs font-bold transition-colors"
                   title="Play the Key Center Tonic (Do)"
                 >
@@ -258,6 +268,11 @@ export const LessonModal: React.FC<LessonModalProps> = ({
                 </button>
               )}
             </div>
+
+            {/* Mobile Sound Advice Tip */}
+            <p className="text-[11px] text-slate-400 font-medium mt-3 text-center px-2">
+              📱 <em>On iPhone/Android: If you hear no sound, check that your phone's physical Silent switch is OFF.</em>
+            </p>
           </div>
 
           {/* Options Grid */}
