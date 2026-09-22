@@ -1,0 +1,13 @@
+{
+  "name": "cadence-ear-training",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cadence — Duolingo-style Ear Training Native/Web App",
+  "scripts": {
+    "start": "node server/src/index.js",
+    "server": "node --watch server/src/index.js",
+    "client": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "test": "node server/src/testDb.js && node server/src/testE2E.js"
+  }
+}
