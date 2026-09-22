@@ -51,19 +51,21 @@ class SoundEngine {
   public startLoopingAudio() {
     if (this.bgAudio || typeof window === 'undefined') return;
     try {
-      const silentWav = 'data:audio/wav;base64,UklGRisAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQcAAACAgICAgICAAAA=';
+      const silentMp3 = 'data:audio/mp3;base64,//MkxAAHiAICWABElBeKPL/RANb2w+yiT1g/gTok//lP/W/l3h8QO/OCdCqCW2Cw//MkxAQHkAIWUAhEmAQXWUOFW2dxPu//9mr60ElY5sseQ+xxesmHKtZr7bsqqX2L//MkxAgFwAYiQAhEAC2hq22d3///9FTV6tA36JdgBJoOGgc+7qvqej5Zu7/7uI9l//MkxBQHAAYi8AhEAO193vt9KGOq+6qcT7hhfN5FTInmwk8RkqKImTM55pRQHQSq//MkxBsGkgoIAABHhTACIJLf99nVI///yuW1uBqWfEu7CgNPWGpUadBmZ////4sL//MkxCMHMAH9iABEmAsKioqKigsLCwtVTEFNRTMuOTkuNVVVVVVVVVVVVVVVVVVV//MkxCkECAUYCAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
       const audio = document.createElement('audio');
       audio.setAttribute('x-webkit-airplay', 'deny');
       audio.setAttribute('playsinline', 'true');
       audio.preload = 'auto';
       audio.loop = true;
       audio.volume = 0.001;
-      audio.src = silentWav;
+      audio.src = silentMp3;
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.then(() => {
           this.bgAudio = audio;
-        }).catch(() => {});
+        }).catch(() => {
+          this.bgAudio = null;
+        });
       }
     } catch (e) {
       console.warn('Silent audio loop error:', e);
