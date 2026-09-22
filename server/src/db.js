@@ -2,12 +2,12 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const dataDir = path.resolve(__dirname, '../data');
+const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'eartraining.sqlite');
+const dbPath = process.env.DATABASE_PATH || path.join(dataDir, 'eartraining.sqlite');
 const db = new DatabaseSync(dbPath);
 
 // Enable WAL mode & foreign keys for speed and reliability
