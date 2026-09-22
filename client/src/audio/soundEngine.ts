@@ -1,4 +1,5 @@
 // Zero-dependency, high-fidelity Web Audio API Sound Engine
+// Optimized for Mobile Safari, iOS Chrome, Android, and Desktop browsers
 
 export type SoundPreset = 'grand_piano' | 'rhodes' | 'synth' | 'marimba';
 
@@ -24,6 +25,7 @@ class SoundEngine {
   private currentPreset: SoundPreset = 'grand_piano';
   private masterGain: GainNode | null = null;
   private activeDroneGain: GainNode | null = null;
+  private bgAudio: HTMLAudioElement | null = null;
 
   public initContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -33,7 +35,7 @@ class SoundEngine {
       if (!AudioCtx) return null;
       this.ctx = new AudioCtx();
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(0.85, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(0.9, this.ctx.currentTime);
       this.masterGain.connect(this.ctx.destination);
     }
 
@@ -44,8 +46,33 @@ class SoundEngine {
     return this.ctx;
   }
 
+  // Persistent silent HTML5 audio loop to keep iOS in AVAudioSessionCategoryPlayback mode
+  // This bypasses the iPhone physical mute/silent switch!
+  public startLoopingAudio() {
+    if (this.bgAudio || typeof window === 'undefined') return;
+    try {
+      const silentWav = 'data:audio/wav;base64,UklGRisAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQcAAACAgICAgICAAAA=';
+      const audio = document.createElement('audio');
+      audio.setAttribute('x-webkit-airplay', 'deny');
+      audio.setAttribute('playsinline', 'true');
+      audio.preload = 'auto';
+      audio.loop = true;
+      audio.volume = 0.001;
+      audio.src = silentWav;
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          this.bgAudio = audio;
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Silent audio loop error:', e);
+    }
+  }
+
   // Explicit unlock called on user interactions (touchstart/touchend/click)
   public async unlock(): Promise<boolean> {
+    this.startLoopingAudio();
     const ctx = this.initContext();
     if (!ctx) return false;
 
@@ -54,22 +81,12 @@ class SoundEngine {
         await ctx.resume();
       }
 
-      // 1. Play 1-frame silent buffer through Web Audio API
+      // Play 1-frame silent buffer through Web Audio API
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
       source.start(0);
-
-      // 2. Play a brief silent HTML5 audio element to switch iOS from 'ambient' to 'playback'
-      // This allows sound to play even if the iPhone ring/silent switch is set to silent!
-      const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-      silentAudio.setAttribute('playsinline', 'true');
-      silentAudio.volume = 0.01;
-      const playPromise = silentAudio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(() => {});
-      }
 
       return true;
     } catch (e) {
@@ -78,7 +95,8 @@ class SoundEngine {
     }
   }
 
-  public async ensureRunning(): Promise<void> {
+  public async ensureRunning(): Promise<AudioContext | null> {
+    this.startLoopingAudio();
     const ctx = this.initContext();
     if (ctx && (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted')) {
       try {
@@ -86,6 +104,46 @@ class SoundEngine {
       } catch (e) {
         console.warn('Context resume failed:', e);
       }
+    }
+    return ctx;
+  }
+
+  public getState(): string {
+    return this.ctx ? this.ctx.state : 'uninitialized';
+  }
+
+  // Loud, simple test tone directly through destination for instant verification
+  public async testBeep(): Promise<{ success: boolean; state: string; error?: string }> {
+    try {
+      await this.unlock();
+      const ctx = this.initContext();
+      if (!ctx) return { success: false, state: 'no-context', error: 'No AudioContext available' };
+
+      if (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted') {
+        await ctx.resume();
+      }
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      const startTime = ctx.currentTime + 0.02;
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, startTime); // Standard A4 (440Hz)
+
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.6, startTime + 0.02);
+      gain.gain.linearRampToValueAtTime(0, startTime + 0.5);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(startTime);
+      osc.stop(startTime + 0.5);
+
+      return { success: true, state: ctx.state };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, state: this.ctx?.state || 'error', error: errorMsg };
     }
   }
 
@@ -107,7 +165,8 @@ class SoundEngine {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
-    const startTime = this.ctx.currentTime + delay;
+    // Safe lookahead for mobile WebKit timing
+    const startTime = this.ctx.currentTime + Math.max(delay, 0.04);
     const freq = noteToFreq(note);
 
     if (this.currentPreset === 'grand_piano') {
@@ -121,7 +180,7 @@ class SoundEngine {
     }
   }
 
-  // Grand Piano synthesis: Fundamental + 3 natural overtones + hammer attack + exponential release
+  // Grand Piano synthesis: Fundamental + 3 natural overtones with linear envelope ramps
   private synthesizePianoNote(freq: number, startTime: number, duration: number, velocity: number) {
     if (!this.ctx || !this.masterGain) return;
 
@@ -132,11 +191,10 @@ class SoundEngine {
       { mult: 4, gain: 0.08, decay: duration * 0.4 }
     ];
 
-    // Low-pass filter simulating wooden piano soundboard damping
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(Math.min(freq * 8, 8000), startTime);
-    filter.frequency.exponentialRampToValueAtTime(Math.max(freq * 2, 800), startTime + duration);
+    filter.frequency.linearRampToValueAtTime(Math.max(freq * 2, 800), startTime + duration);
     filter.connect(this.masterGain);
 
     harmonics.forEach(h => {
@@ -147,11 +205,11 @@ class SoundEngine {
       osc.type = h.mult === 1 ? 'sine' : 'triangle';
       osc.frequency.setValueAtTime(freq * h.mult, startTime);
 
-      // Attack: fast 8ms ramp to avoid clicking
-      gainNode.gain.setValueAtTime(0.0001, startTime);
-      gainNode.gain.exponentialRampToValueAtTime(h.gain * velocity, startTime + 0.008);
-      // Exponential decay
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + h.decay);
+      // Attack: fast 8ms linear ramp
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.linearRampToValueAtTime(h.gain * velocity, startTime + 0.01);
+      // Linear decay
+      gainNode.gain.linearRampToValueAtTime(0, startTime + h.decay);
 
       osc.connect(gainNode);
       gainNode.connect(filter);
@@ -173,18 +231,17 @@ class SoundEngine {
     carrier.type = 'sine';
     carrier.frequency.setValueAtTime(freq, startTime);
 
-    // Modulator at 2x frequency (FM bell timbre)
     modulator.type = 'sine';
     modulator.frequency.setValueAtTime(freq * 2, startTime);
     modGain.gain.setValueAtTime(freq * 1.5, startTime);
-    modGain.gain.exponentialRampToValueAtTime(0.1, startTime + 0.6);
+    modGain.gain.linearRampToValueAtTime(0.1, startTime + 0.6);
 
     modulator.connect(modGain);
     modGain.connect(carrier.frequency);
 
-    carrierGain.gain.setValueAtTime(0.0001, startTime);
-    carrierGain.gain.exponentialRampToValueAtTime(0.6 * velocity, startTime + 0.015);
-    carrierGain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration * 1.3);
+    carrierGain.gain.setValueAtTime(0, startTime);
+    carrierGain.gain.linearRampToValueAtTime(0.6 * velocity, startTime + 0.015);
+    carrierGain.gain.linearRampToValueAtTime(0, startTime + duration * 1.3);
 
     carrier.connect(carrierGain);
     carrierGain.connect(this.masterGain);
@@ -208,15 +265,15 @@ class SoundEngine {
     osc1.frequency.setValueAtTime(freq, startTime);
 
     osc2.type = 'sine';
-    osc2.frequency.setValueAtTime(freq / 2, startTime); // sub-octave
+    osc2.frequency.setValueAtTime(freq / 2, startTime);
 
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(1400, startTime);
     filter.Q.setValueAtTime(3, startTime);
 
-    gainNode.gain.setValueAtTime(0.0001, startTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.5 * velocity, startTime + 0.03);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    gainNode.gain.setValueAtTime(0, startTime);
+    gainNode.gain.linearRampToValueAtTime(0.5 * velocity, startTime + 0.03);
+    gainNode.gain.linearRampToValueAtTime(0, startTime + duration);
 
     osc1.connect(filter);
     osc2.connect(filter);
@@ -229,7 +286,7 @@ class SoundEngine {
     osc2.stop(startTime + duration);
   }
 
-  // Marimba: Crisp wooden percussive mallet
+  // Marimba / Wooden Mallet synthesis
   private synthesizeMarimbaNote(freq: number, startTime: number, duration: number, velocity: number) {
     if (!this.ctx || !this.masterGain) return;
 
@@ -239,9 +296,9 @@ class SoundEngine {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, startTime);
 
-    gainNode.gain.setValueAtTime(0.0001, startTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.7 * velocity, startTime + 0.004);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + Math.min(duration, 0.7));
+    gainNode.gain.setValueAtTime(0, startTime);
+    gainNode.gain.linearRampToValueAtTime(0.7 * velocity, startTime + 0.005);
+    gainNode.gain.linearRampToValueAtTime(0, startTime + Math.min(duration, 0.7));
 
     osc.connect(gainNode);
     gainNode.connect(this.masterGain);
@@ -272,10 +329,9 @@ class SoundEngine {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
-    // Stop existing drone if playing
     if (this.activeDroneGain) {
       try {
-        this.activeDroneGain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+        this.activeDroneGain.gain.setValueAtTime(0, this.ctx.currentTime);
       } catch (e) {
         // ignore
       }
@@ -285,31 +341,30 @@ class SoundEngine {
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
 
+    const startTime = this.ctx.currentTime + 0.02;
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+    osc.frequency.setValueAtTime(freq, startTime);
 
-    gain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0.18, this.ctx.currentTime + 0.3);
-    gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + duration);
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.25, startTime + 0.2);
+    gain.gain.linearRampToValueAtTime(0, startTime + duration);
 
     osc.connect(gain);
     gain.connect(this.masterGain);
 
-    osc.start();
-    osc.stop(this.ctx.currentTime + duration);
+    osc.start(startTime);
+    osc.stop(startTime + duration);
     this.activeDroneGain = gain;
   }
 
-  // Play comparison between two sounds (e.g. what was played vs user's chosen answer)
+  // Play comparison between two sounds
   public playComparison(firstNotes: string[], secondNotes: string[]) {
-    // Play first sound
     if (firstNotes.length === 1) {
       this.playNote(firstNotes[0], 0.9, 0);
     } else {
       this.playChord(firstNotes, 1.0, 0.03);
     }
 
-    // Play second sound after 1.2s pause
     setTimeout(() => {
       if (secondNotes.length === 1) {
         this.playNote(secondNotes[0], 0.9, 0);
@@ -319,13 +374,13 @@ class SoundEngine {
     }, 1200);
   }
 
-  // UI Sound Effects
+  // Positive Duolingo chime: C5 -> G5 fast upward fifth
   public playSuccessChime() {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
-    const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
-    const startTime = this.ctx.currentTime;
+    const notes = [523.25, 783.99];
+    const startTime = this.ctx.currentTime + 0.02;
 
     notes.forEach((freq, idx) => {
       if (!this.ctx || !this.masterGain) return;
@@ -335,46 +390,49 @@ class SoundEngine {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(freq, startTime + idx * 0.08);
 
-      gain.gain.setValueAtTime(0.0001, startTime + idx * 0.08);
-      gain.gain.exponentialRampToValueAtTime(0.25, startTime + idx * 0.08 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + idx * 0.08 + 0.4);
+      gain.gain.setValueAtTime(0, startTime + idx * 0.08);
+      gain.gain.linearRampToValueAtTime(0.3, startTime + idx * 0.08 + 0.015);
+      gain.gain.linearRampToValueAtTime(0, startTime + idx * 0.08 + 0.35);
 
       osc.connect(gain);
       gain.connect(this.masterGain);
 
       osc.start(startTime + idx * 0.08);
-      osc.stop(startTime + idx * 0.08 + 0.4);
+      osc.stop(startTime + idx * 0.08 + 0.35);
     });
   }
 
+  // Negative buzz: Descending harsh tone
   public playErrorSound() {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
+    const startTime = this.ctx.currentTime + 0.02;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
 
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(180, this.ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(110, this.ctx.currentTime + 0.25);
+    osc.frequency.setValueAtTime(180, startTime);
+    osc.frequency.linearRampToValueAtTime(110, startTime + 0.25);
 
-    gain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.3, this.ctx.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.35, startTime + 0.02);
+    gain.gain.linearRampToValueAtTime(0, startTime + 0.28);
 
     osc.connect(gain);
     gain.connect(this.masterGain);
 
-    osc.start();
-    osc.stop(this.ctx.currentTime + 0.3);
+    osc.start(startTime);
+    osc.stop(startTime + 0.28);
   }
 
+  // Streak Fanfare
   public playStreakFanfare() {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
-    const notes = [392.00, 523.25, 659.25, 783.99, 1046.50]; // G4, C5, E5, G5, C6
-    const startTime = this.ctx.currentTime;
+    const notes = [392.00, 523.25, 659.25, 783.99, 1046.50];
+    const startTime = this.ctx.currentTime + 0.02;
 
     notes.forEach((freq, idx) => {
       if (!this.ctx || !this.masterGain) return;
@@ -384,36 +442,40 @@ class SoundEngine {
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(freq, startTime + idx * 0.1);
 
-      gain.gain.setValueAtTime(0.0001, startTime + idx * 0.1);
-      gain.gain.exponentialRampToValueAtTime(0.35, startTime + idx * 0.1 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + idx * 0.1 + (idx === notes.length - 1 ? 1.0 : 0.5));
+      const noteDuration = idx === notes.length - 1 ? 0.9 : 0.4;
+      gain.gain.setValueAtTime(0, startTime + idx * 0.1);
+      gain.gain.linearRampToValueAtTime(0.35, startTime + idx * 0.1 + 0.02);
+      gain.gain.linearRampToValueAtTime(0, startTime + idx * 0.1 + noteDuration);
 
       osc.connect(gain);
       gain.connect(this.masterGain);
 
       osc.start(startTime + idx * 0.1);
-      osc.stop(startTime + idx * 0.1 + 1.0);
+      osc.stop(startTime + idx * 0.1 + noteDuration);
     });
   }
 
+  // Tactile button click sound
   public playButtonClick() {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
+    const startTime = this.ctx.currentTime + 0.01;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
 
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(400, this.ctx.currentTime);
+    osc.frequency.setValueAtTime(400, startTime);
 
-    gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + 0.04);
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.12, startTime + 0.005);
+    gain.gain.linearRampToValueAtTime(0, startTime + 0.04);
 
     osc.connect(gain);
     gain.connect(this.masterGain);
 
-    osc.start();
-    osc.stop(this.ctx.currentTime + 0.04);
+    osc.start(startTime);
+    osc.stop(startTime + 0.04);
   }
 }
 

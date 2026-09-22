@@ -4,15 +4,22 @@ import './index.css';
 import App from './App';
 import { AuthProvider } from './context/AuthContext';
 import { soundEngine } from './audio/soundEngine';
+import unmuteIosAudio from 'unmute-ios-audio';
 
-// Global unlock for mobile browsers (iOS Safari, Android Chrome) on first user interaction
+// Automatically unmute WebAudio on iOS Safari & Chrome even when mute switch is on
+try {
+  unmuteIosAudio();
+} catch (e) {
+  console.warn('unmuteIosAudio init error:', e);
+}
+
+// Global unlock for mobile browsers (iOS Safari, Chrome, Android) on first user interaction
 const unlockAudio = () => {
   soundEngine.unlock();
 };
-window.addEventListener('touchstart', unlockAudio, { passive: true });
-window.addEventListener('touchend', unlockAudio, { passive: true });
-window.addEventListener('pointerdown', unlockAudio, { passive: true });
-window.addEventListener('click', unlockAudio, { passive: true });
+['touchstart', 'touchend', 'pointerdown', 'click'].forEach(evt => {
+  window.addEventListener(evt, unlockAudio, { passive: true });
+});
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -38,6 +38,18 @@ export const LessonModal: React.FC<LessonModalProps> = ({
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isComparing, setIsComparing] = useState(false);
   const [streakResult, setStreakResult] = useState<any>(null);
+  const [audioStatus, setAudioStatus] = useState<string | null>(null);
+
+  const handleTestAudio = async () => {
+    setAudioStatus('Testing audio...');
+    const res = await soundEngine.testBeep();
+    if (res.success) {
+      setAudioStatus(`Audio active! (State: ${res.state})`);
+    } else {
+      setAudioStatus(`Audio error: ${res.error || res.state}`);
+    }
+    setTimeout(() => setAudioStatus(null), 5000);
+  };
 
   const currentQuestion = questions[currentIndex] || questions[0];
   const totalQuestions = questions.length;
@@ -269,9 +281,26 @@ export const LessonModal: React.FC<LessonModalProps> = ({
               )}
             </div>
 
+            {/* Test Audio Diagnostic Button */}
+            <div className="flex flex-col items-center mt-3">
+              <button
+                onClick={handleTestAudio}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 text-xs font-semibold transition-all active:scale-95"
+              >
+                <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Test Audio (Beep)</span>
+              </button>
+
+              {audioStatus && (
+                <span className="mt-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 animate-pulse">
+                  {audioStatus}
+                </span>
+              )}
+            </div>
+
             {/* Mobile Sound Advice Tip */}
-            <p className="text-[11px] text-slate-400 font-medium mt-3 text-center px-2">
-              📱 <em>On iPhone/Android: If you hear no sound, check that your phone's physical Silent switch is OFF.</em>
+            <p className="text-[11px] text-slate-400 font-medium mt-2.5 text-center px-2">
+              📱 <em>On iPhone: Check that your side Silent switch is set to Ring & media volume is turned up.</em>
             </p>
           </div>
 
